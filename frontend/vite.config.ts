@@ -13,5 +13,11 @@ export default defineConfig({
     port: 5173,
     host: true,  // 允许外部访问
     allowedHosts: true,  // 允许所有 Host（包括 ngrok）
+    proxy: {
+      '/api': {
+        target: 'http://localhost:5174',
+        changeOrigin: true,
+      },
+    },
   },
 })

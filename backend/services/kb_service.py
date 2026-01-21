@@ -121,6 +121,20 @@ class KnowledgeBaseService:
         
         return True
     
+    def rename(self, kb_id, new_name):
+        """Rename a knowledge base."""
+        if kb_id == "default":
+            raise ValueError("Cannot rename default knowledge base")
+        
+        kbs = self._load()
+        for kb in kbs:
+            if kb['id'] == kb_id:
+                kb['name'] = new_name
+                self._save(kbs)
+                return kb
+        
+        raise ValueError(f"Knowledge base '{kb_id}' not found")
+    
     def update_file_count(self, kb_id):
         """Update file count for a knowledge base."""
         kbs = self._load()

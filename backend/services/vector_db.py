@@ -1,4 +1,5 @@
 import time
+import uuid
 import weaviate
 import weaviate.classes.config as wvc
 from weaviate.classes.query import MetadataQuery
@@ -35,16 +36,46 @@ class VectorDB:
                 name=self.collection_name,
                 vectorizer_config=None, # Use manual vectors
                 properties=[
-                    wvc.Property(name="text", data_type=wvc.DataType.TEXT),
+                    # Use whitespace tokenizer to support our Chinese char-level hack
+                    wvc.Property(
+                        name="text", 
+                        data_type=wvc.DataType.TEXT,
+                        tokenization=wvc.Tokenization.WHITESPACE
+                    ),
                     wvc.Property(name="source_file", data_type=wvc.DataType.TEXT, skip_vectorization=True),
                     wvc.Property(name="file_type", data_type=wvc.DataType.TEXT, skip_vectorization=True),
                     wvc.Property(name="chunk_id", data_type=wvc.DataType.INT, skip_vectorization=True),
                     wvc.Property(name="doc_id", data_type=wvc.DataType.TEXT, skip_vectorization=True),
                     wvc.Property(name="upload_date", data_type=wvc.DataType.TEXT, skip_vectorization=True),
                     wvc.Property(name="tags", data_type=wvc.DataType.TEXT_ARRAY, skip_vectorization=True),
+                    # Small-to-Big metadata
+                    wvc.Property(name="is_parent", data_type=wvc.DataType.BOOL, skip_vectorization=True),
+                    wvc.Property(name="parent_id", data_type=wvc.DataType.TEXT, skip_vectorization=True),
                 ]
             )
         self.collection = self.client.collections.get(self.collection_name)
+    
+    def _preprocess_chinese(self, text):
+        """
+        Hack for Chinese support in Weaviate BM25/Hybrid search:
+        Inserts spaces between Chinese characters to treat them as individual tokens
+        with the 'whitespace' tokenizer.
+        Example: "你好123" -> "你 好 123"
+        """
+        if not text:
+            return ""
+        import re
+        # Insert space between Chinese characters
+        # \u4e00-\u9fff is the range for CJK Unified Ideographs
+        processed = ""
+        for char in text:
+            if re.match(r'[\u4e00-\u9fff]', char):
+                processed += f" {char} "
+            else:
+                processed += char
+        # Clean up double spaces
+        return re.sub(r'\s+', ' ', processed).strip()
+
     
     def switch_kb(self, kb_id):
         """Switch to a different knowledge base."""
@@ -101,19 +132,25 @@ class VectorDB:
                 
                 # Prepare properties
                 properties = {
-                    "text": doc,
+                    "text": self._preprocess_chinese(doc),
                     "source_file": meta.get("source_file", ""),
                     "file_type": meta.get("file_type", ""),
                     "chunk_id": int(meta.get("page_number", 0)), 
-                    "doc_id": ids[i] if ids else "",
-                    "upload_date": meta.get("upload_date", "")
+                    "doc_id": ids[i] if ids and i < len(ids) else str(uuid.uuid4()),
+                    "upload_date": meta.get("upload_date", ""),
+                    "is_parent": meta.get("is_parent", False),
+                    "parent_id": meta.get("parent_id", "")
                 }
+                
+                # Update ID in history if we generated one
+                generated_id = properties["doc_id"]
                 
                 # Add object with vector
                 vector = vectors[i] if vectors else None
                 batch.add_object(
                     properties=properties,
-                    vector=vector
+                    vector=vector,
+                    uuid=generated_id
                 )
         
         if self.collection.batch.failed_objects:
@@ -131,13 +168,16 @@ class VectorDB:
             from config import Config
             alpha = Config.SETTINGS.get("hybrid_alpha", 0.5)
         
-        # Manual vectorization if needed for hybrid search in Weaviate
+        # 1. Preprocess query text for Chinese BM25 matching
+        processed_query = self._preprocess_chinese(query_text)
+        
+        # 2. Manual vectorization if needed for hybrid search in Weaviate
         vector = None
         if alpha > 0 and self.embedding_fn:
-            vector = self.embedding_fn(query_text)
+            vector = self.embedding_fn(query_text) # Use original text for vectorization
 
         response = self.collection.query.hybrid(
-            query=query_text,
+            query=processed_query,
             vector=vector,
             limit=n_results,
             alpha=alpha,
@@ -146,14 +186,40 @@ class VectorDB:
         
         results = []
         for obj in response.objects:
+            text = obj.properties.get("text", "")
+            parent_id = obj.properties.get("parent_id")
+            source_file = obj.properties.get("source_file", "Unknown")
+            
+            # Small-to-Big: If this is a small chunk, fetch its parent for richer context
+            if parent_id:
+                parent_text = self.fetch_parent(parent_id)
+                if parent_text:
+                    text = parent_text
+            
             results.append({
-                "text": obj.properties["text"],
+                "text": text,
                 "metadata": {
-                    "source_file": obj.properties["source_file"],
+                    "source_file": source_file,
                     "score": obj.metadata.score,
-                    "chunk_id": obj.properties["chunk_id"]
+                    "chunk_id": obj.properties.get("chunk_id", 0),
+                    "parent_id": parent_id
                 }
             })
+            
+        # Optional: Deduplicate by parent_id if multiple small chunks hit the same parent
+        if len(results) > 1:
+            seen_parents = set()
+            dedup_results = []
+            for r in results:
+                p_id = r["metadata"]["parent_id"]
+                if p_id:
+                    if p_id not in seen_parents:
+                        seen_parents.add(p_id)
+                        dedup_results.append(r)
+                else:
+                    dedup_results.append(r)
+            return dedup_results
+            
         return results
 
     def delete_collection(self):
@@ -205,6 +271,21 @@ class VectorDB:
         except Exception as e:
             print(f"Error fetching file content: {e}")
             return f"Error loading preview: {str(e)}"
+    
+    def fetch_parent(self, parent_id):
+        """Fetches the content of a parent chunk by its ID."""
+        try:
+             from weaviate.classes.query import Filter
+             response = self.collection.query.fetch_objects(
+                filters=Filter.by_property("doc_id").equal(parent_id),
+                limit=1
+             )
+             if response.objects:
+                 return response.objects[0].properties.get("text")
+             return None
+        except Exception as e:
+            print(f"Error fetching parent {parent_id}: {e}")
+            return None
 
     def delete_document(self, filename):
         """

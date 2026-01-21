@@ -7,15 +7,21 @@ class LLMService:
         self.config = config
         dashscope.api_key = self.config.DASH_SCOPE_API_KEY
 
-    def generate_response(self, query, context_docs):
+    def generate_response(self, query, context_docs, history=None):
         """
         Returns a tuple: (content, usage_dict)
-        usage_dict example: {'total_tokens': 150, 'input_tokens': 100, 'output_tokens': 50}
         """
+        history = history or []
         context_text = "\n\n".join([f"[{i+1}] 资料片段:\n{doc}" for i, doc in enumerate(context_docs)])
         
+        # Format history for prompt
+        history_text = ""
+        if history:
+            history_text = "\n".join([f"{'用户' if m['role']=='user' else '助手'}: {m['content']}" for m in history[-5:]])
+            history_text = f"### 最近对话历史：\n{history_text}\n\n"
+
         prompt = f"""你是一个专业的企业智能助手。北京时间现在是{os.getenv("CURRENT_TIME", "2024年")}。
-请基于以下提供的【参考资料】回答用户问题。
+{history_text}请基于以下提供的【参考资料】回答用户最新的问题。
 
 ### 要求：
 1. **精准推荐**：如果用户要求推荐PPT或资料，请根据资料内容识别出最相关的文件名，并说明推荐理由。
@@ -25,7 +31,7 @@ class LLMService:
 ### 参考资料：
 {context_text}
 
-### 用户问题：
+### 用户当前问题：
 {query}
 
 ### 建议回答："""
@@ -128,8 +134,10 @@ class LLMService:
             
         try:
             from dashscope import TextEmbedding
+            model_name = TextEmbedding.Models.text_embedding_v2
+            print(f"DEBUG: Generating embedding using model: {model_name}")
             resp = TextEmbedding.call(
-                model=TextEmbedding.Models.text_embedding_v2,
+                model=model_name,
                 input=text_or_list,
                 api_key=api_key
             )
@@ -186,24 +194,91 @@ class LLMService:
             print(f"Rerank Exception: {str(e)}. Falling back.")
             return list(range(min(len(documents), top_n)))
 
-    def generate_stream(self, query, context_docs):
+    def rewrite_query(self, query, history):
+        """
+        Rewrites the user query to be standalone based on conversation history.
+        """
+        if not history:
+            return query
+            
+        history_text = "\n".join([f"{'User' if m['role']=='user' else 'Assistant'}: {m['content']}" for m in history[-5:]])
+        
+        prompt = f"""Given the conversation history and a new user query, rewrite the query to be a standalone search query that can be used for RAG retrieval.
+If the query is already independent, return it exactly as is.
+No preamble, just the output.
+
+History:
+{history_text}
+
+New user query: {query}
+Standalone query:"""
+
+        messages = [
+            {'role': 'system', 'content': 'You are a query rewriter for a RAG system.'},
+            {'role': 'user', 'content': prompt}
+        ]
+
+        try:
+            provider = self.config.SETTINGS.get("llm_provider", "dashscope")
+            api_key = self.config.SETTINGS.get("api_key")
+            model = self.config.SETTINGS.get("model_name")
+            
+            if provider == "dashscope":
+                dashscope.api_key = api_key
+                response = dashscope.Generation.call(
+                    model=model,
+                    messages=messages,
+                    result_format='message',
+                    temperature=0.1
+                )
+                if response.status_code == HTTPStatus.OK:
+                    rewritten = response.output.choices[0].message.content.strip()
+                    rewritten = rewritten.strip('"').strip("'")
+                    print(f"DEBUG: Query rewritten to: {rewritten}")
+                    return rewritten
+            elif provider in ["deepseek", "openai"]:
+                import requests
+                base_url = self.config.SETTINGS.get("base_url", "")
+                if provider == "deepseek" and not base_url:
+                    base_url = "https://api.deepseek.com"
+                endpoint = f"{base_url.rstrip('/')}/chat/completions"
+                headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+                payload = {"model": model, "messages": messages, "temperature": 0.1, "stream": False}
+                resp = requests.post(endpoint, json=payload, headers=headers, timeout=30)
+                if resp.status_code == 200:
+                    rewritten = resp.json()['choices'][0]['message']['content'].strip()
+                    rewritten = rewritten.strip('"').strip("'")
+                    print(f"DEBUG: Query rewritten to: {rewritten}")
+                    return rewritten
+        except Exception as e:
+            print(f"ERROR: Query rewriting failed: {e}")
+            
+        return query
+
+    def generate_stream(self, query, context_docs, history=None):
         """
         Yields chunks of content (strings).
         """
+        history = history or []
         context_text = "\n\n".join([f"[{i+1}] 资料片段:\n{doc}" for i, doc in enumerate(context_docs)])
         
+        history_text = ""
+        if history:
+            history_text = "\n".join([f"{'用户' if m['role']=='user' else '助手'}: {m['content']}" for m in history[-5:]])
+            history_text = f"### 最近对话历史：\n{history_text}\n\n"
+
         prompt = f"""你是一个专业的企业智能助手。
-请基于以下提供的【参考资料】回答用户问题。
+{history_text}请基于以下提供的【参考资料】回答用户当前的提问。
 
 ### 要求：
 1. **精准推荐**：如果用户要求推荐PPT或资料，请根据资料内容识别出最相关的文件名，并说明推荐理由。
 2. **行内引用**：在回答中使用 [1]、[2] 等数字标记引用对应的资料片段，例如"根据相关数据[1]显示..."。
-3. **诚实原则**：如果资料中完全没有相关信息，请直接告知，不要编造。
+3. **诚实原则：如果资料中完全没有相关信息，请直接告知，不要编造。
 
 ### 参考资料：
 {context_text}
 
-### 用户问题：
+### 用户当前问题：
 {query}
 
 ### 建议回答："""

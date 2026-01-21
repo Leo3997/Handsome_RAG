@@ -128,7 +128,9 @@ export default function ChatView() {
                     docCount: stats.doc_count
                 })
             },
-            selectedKbId
+            selectedKbId,
+            // Prepare history: take last 10 messages, keep only role and content
+            messages.slice(-10).map(m => ({ role: m.role, content: m.content }))
         );
     } catch (error) {
         console.error("Chat Error:", error)
@@ -435,8 +437,10 @@ export default function ChatView() {
 
                     {/* Main Image */}
                     <div className="relative w-full h-full flex items-center justify-center p-4">
-                         <img 
-                            src={`http://localhost:5000${selectedPPT.slides[currentSlideIndex]}`} 
+                          <img 
+                            src={selectedPPT.slides[currentSlideIndex].startsWith('http') 
+                                ? selectedPPT.slides[currentSlideIndex].replace('http://localhost:5000', '/api') 
+                                : `/api/slides/${selectedPPT.slides[currentSlideIndex].split('/').pop()}`} 
                             alt={`Slide ${currentSlideIndex + 1}`}
                             className="max-h-[75vh] w-auto object-contain rounded-sm shadow-2xl"
                          />

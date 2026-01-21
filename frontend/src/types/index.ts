@@ -57,6 +57,7 @@ export interface QueryResponse {
 export interface BackendStats {
   total_files: number;
   indexed_chunks: number;
+  total_size_mb?: number;
   db_active: boolean;
 }
 

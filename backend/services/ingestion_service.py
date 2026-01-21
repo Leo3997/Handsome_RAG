@@ -23,14 +23,15 @@ class IngestionService:
         self.svg_processor = SVGProcessor(config)
         
         # Initialize helper modules
-        self.chunker = Chunker()
+        # Initialize helper modules
+        self.chunker = Chunker(embedding_fn=self.vector_db.embedding_fn)
 
     def process_file(self, file_path):
         """
         Orchestrates the ingestion process:
         1. Identify file type
         2. Extract content using appropriate processor
-        3. Clean and Chunk content
+        3. Clean and Semantic-Chunk content (Small-to-Big)
         4. Generate embeddings and store in VectorDB
         """
         filename = os.path.basename(file_path)
@@ -42,13 +43,12 @@ class IngestionService:
 
         documents = []
         metadatas = []
-        ids = [] # Weaviate might auto-generate IDs, but we can provide UUIDs if we want. 
-                 # For simplicity, we'll let Weaviate handle UUIDs or generate deterministic ones if needed.
-                 # Updated VectorDB.add_documents handles ids optionally.
+        ids = []
 
         try:
-            extracted_data = []
+            extracted_data = [] # List of {'text_content': str, 'page_number': int, ...}
             
+            # ... (File type identification logic, unchanged) ...
             if ext in ['ppt', 'pptx']:
                 extracted_data = self.ppt_processor.process(file_path)
                 file_type = "ppt"
@@ -67,54 +67,63 @@ class IngestionService:
             elif ext in ['svg']:
                 extracted_data = self.svg_processor.process(file_path)
                 file_type = "svg"
+            elif ext in ['txt', 'md']:
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    text_content = f.read()
+                extracted_data = [{"text_content": text_content, "page_number": 1}]
+                file_type = "text"
             else:
-                print(f"Skipping unsupported file type: {ext}")
                 return {"status": "skipped", "message": f"Unsupported extension: {ext}"}
             
-            # Process extracted data (cleaning + chunking)
-            chunk_counter = 0
+            # RAG 2.0: Parent-Child Chunking
             for item in extracted_data:
                 raw_text = item.get('text_content', '')
                 cleaned_text = TextCleaner.clean(raw_text)
-                
-                if not cleaned_text:
+                if not cleaned_text or len(cleaned_text) < 5:
                     continue
-                    
-                chunks = self.chunker.split_text(cleaned_text)
                 
-                for i, chunk in enumerate(chunks):
+                # 1. Store the Full Page/Block as Parent
+                parent_id = str(uuid.uuid4())
+                documents.append(cleaned_text)
+                parent_meta = {
+                    "source_file": filename,
+                    "file_type": file_type,
+                    "upload_date": upload_date,
+                    "page_number": item.get('page_number', 0),
+                    "is_parent": True,
+                    "doc_id": parent_id
+                }
+                if 'image_url' in item: parent_meta['image_url'] = item['image_url']
+                metadatas.append(parent_meta)
+                ids.append(parent_id)
+                
+                # 2. Store Semantic Fragments as Children
+                # Using semantic mode for better boundaries
+                child_chunks = self.chunker.split_text(cleaned_text, mode="semantic")
+                
+                for i, chunk in enumerate(child_chunks):
+                    # Skip if the chunk is identical to parent (no need to double store)
+                    if len(child_chunks) == 1 and chunk == cleaned_text:
+                        continue
+                        
                     documents.append(chunk)
-                    
-                    # Construct metadata
-                    meta = {
+                    child_meta = {
                         "source_file": filename,
                         "file_type": file_type,
-                        "file_size": file_size,
                         "upload_date": upload_date,
                         "page_number": item.get('page_number', 0),
                         "chunk_index": i,
-                        "global_chunk_id": chunk_counter
-                        # Note: image_url logic from previous PPT processor might be lost if not stored 
-                        # in vector DB, but VectorDB focuses on text search. 
-                        # If we need to link back to slide image, we should add it.
+                        "is_parent": False,
+                        "parent_id": parent_id
                     }
-                    if 'image_url' in item:
-                        meta['image_url'] = item['image_url']
-                        
-                    metadatas.append(meta)
-                    
-                    # Create a deterministic ID? 
-                    # user_id = uuid.uuid5(uuid.NAMESPACE_DNS, f"{filename}_{item.get('page_number')}_{i}")
-                    # ids.append(str(user_id))
-                    ids.append(None) # Let Weaviate decide or VectorDB handle it
-                    
-                    chunk_counter += 1
+                    metadatas.append(child_meta)
+                    ids.append(str(uuid.uuid4()))
             
             if documents:
                 self.vector_db.add_documents(documents, metadatas, ids)
-                return {"status": "success", "chunks_processed": len(documents)}
+                return {"status": "success", "total_chunks": len(documents)}
             else:
-                return {"status": "warning", "message": "No content extracted or text was empty"}
+                return {"status": "warning", "message": "No content extracted"}
 
         except Exception as e:
             print(f"Error processing file {filename}: {e}")

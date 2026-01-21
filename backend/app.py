@@ -110,25 +110,39 @@ def get_stats():
     # Get chunk count for the specific KB
     count = vector_db.get_count()
     
-    # Count files for the specific KB
+    # Count files and calculate total size for the specific KB
     file_count = 0
+    total_size_bytes = 0
+    
     if kb_id == 'default':
         # For default KB, count recursively but exclude other KB directories
         other_kb_ids = [kb['id'] for kb in kb_service.list_all() if kb['id'] != 'default']
         for root, dirs, files in os.walk(Config.UPLOAD_FOLDER):
             # Exclude other KB directories
             dirs[:] = [d for d in dirs if d not in other_kb_ids]
-            file_count += len(files)
+            for f in files:
+                file_path = os.path.join(root, f)
+                if os.path.isfile(file_path):
+                    file_count += 1
+                    total_size_bytes += os.path.getsize(file_path)
     else:
         # For specific KB, count only in its directory
         kb_dir = os.path.join(Config.UPLOAD_FOLDER, kb_id)
         if os.path.exists(kb_dir):
-            for _, _, files in os.walk(kb_dir):
-                file_count += len(files)
+            for root, _, files in os.walk(kb_dir):
+                for f in files:
+                    file_path = os.path.join(root, f)
+                    if os.path.isfile(file_path):
+                        file_count += 1
+                        total_size_bytes += os.path.getsize(file_path)
+
+    # Convert to MB
+    total_size_mb = round(total_size_bytes / (1024 * 1024), 2)
 
     return jsonify({
         "total_files": file_count, 
         "indexed_chunks": count,
+        "total_size_mb": total_size_mb,
         "db_active": True
     })
 
@@ -136,26 +150,37 @@ def get_stats():
 def query_rag():
     data = request.json
     query_text = data.get('query')
+    kb_id = data.get('kb_id', 'default')
+    history = data.get('history', [])
+    
     if not query_text:
         return jsonify({"error": "No query provided"}), 400
     
-    search_results = vector_db.query(query_text, n_results=20) # Get more candidates
+    # Switch to the specified knowledge base
+    vector_db.switch_kb(kb_id)
+    
+    # Contextual Query Rewriting
+    search_query = llm_service.rewrite_query(query_text, history)
+
+    search_results = vector_db.query(search_query, n_results=20) # Get more candidates
     context_docs = []
     sources = []
     
     # Intent detection: list files
-    list_keywords = ["列出", "哪些文件", "什么文件", "所有文件", "file list", "list files", "有", "多少文件", "show me files", "files you have"]
+    list_keywords = ["列出", "哪些文件", "什么文件", "所有文件", "file list", "list files", "有", "什么内容", "文件库", "库里", "库中", "show me files", "files you have"]
     if any(k in query_text for k in list_keywords):
         all_files = vector_db.get_all_filenames()
         if all_files:
             file_list_str = "\n".join([f"- {f}" for f in all_files])
-            system_msg = f"【系统提示】这是知识库中所有已归档文件的完整列表（共{len(all_files)}个）：\n{file_list_str}\n如果用户询问有哪些文件，请引用此列表。"
+            system_msg = f"【系统提示】这是当前知识库（ID: {kb_id}）中所有已索引文件的完整列表（共{len(all_files)}个）：\n{file_list_str}\n请基于此列表回答用户关于库中文件的问题。"
             context_docs.append(system_msg)
+        else:
+            context_docs.append(f"【系统提示】当前知识库（ID: {kb_id}）目前是空的，没有已索引的文件。")
     
     if search_results:
         raw_docs = [r['text'] for r in search_results]
         # Perform Rerank
-        reranked_indices = llm_service.rerank(query_text, raw_docs, top_n=5)
+        reranked_indices = llm_service.rerank(search_query, raw_docs, top_n=5)
         
         for idx in reranked_indices:
             result = search_results[idx]
@@ -176,7 +201,7 @@ def query_rag():
         return jsonify({"answer": "抱歉，在知识库中未找到相关资料。", "sources": []})
     
     start_time = time.time()
-    answer, usage = llm_service.generate_response(query_text, context_docs)
+    answer, usage = llm_service.generate_response(query_text, context_docs, history=history)
     end_time = time.time()
     duration = round(end_time - start_time, 2)
     
@@ -210,38 +235,47 @@ def query_rag_stream():
             
         query_text = data.get('query')
         kb_id = data.get('kb_id', 'default')
+        history = data.get('history', [])
         
         if not query_text:
             return jsonify({"error": "No query provided"}), 400
         
         print(f"DEBUG: Streaming query in KB '{kb_id}': {query_text[:50]}...")
         
-        # Switch to the specified knowledge base (with improved thread safety/error handling)
+        # Switch to the specified knowledge base
         try:
             vector_db.switch_kb(kb_id)
         except Exception as e:
             print(f"ERROR: Failed to switch to KB '{kb_id}': {e}")
             return jsonify({"error": f"Failed to access knowledge base: {str(e)}"}), 500
         
+        # Contextual Query Rewriting
+        search_query = llm_service.rewrite_query(query_text, history)
+
         # 1. Retrieval
         try:
-            search_results = vector_db.query(query_text, n_results=20)
+            search_results = vector_db.query(search_query, n_results=20)
+            print(f"DEBUG: VectorDB returned {len(search_results)} results for rewritten query '{search_query[:30]}'")
         except Exception as e:
             print(f"ERROR: Vector query failed: {e}")
             search_results = [] # Fallback to no results
+
             
         context_docs = []
         sources = []
         
-        # Intent detection: list files
-        list_keywords = ["列出", "哪些文件", "什么文件", "所有文件", "file list", "list files", "有", "多少文件", "show me files", "files you have"]
+        # ... (list_keywords logic unchanged) ...
+        # [Existing Intent detection logic here]
+        list_keywords = ["列出", "哪些文件", "什么文件", "所有文件", "file list", "list files", "有", "什么内容", "文件库", "库里", "库中", "show me files", "files you have"]
         if any(k in query_text for k in list_keywords):
             try:
                 all_files = vector_db.get_all_filenames()
                 if all_files:
                     file_list_str = "\n".join([f"- {f}" for f in all_files])
-                    system_msg = f"【系统提示】这是知识库中所有已归档文件的完整列表（共{len(all_files)}个）：\n{file_list_str}\n如果用户询问有哪些文件，请引用此列表。"
+                    system_msg = f"【系统提示】这是当前知识库（ID: {kb_id}）中所有已索引文件的完整列表（共{len(all_files)}个）：\n{file_list_str}\n请依据此列表告知用户库内文件情况。"
                     context_docs.append(system_msg)
+                else:
+                    context_docs.append(f"【系统提示】当前知识库（ID: {kb_id}）目前是空的，没有已索引的文件。")
             except Exception as e:
                 print(f"ERROR: list_all_filenames failed: {e}")
 
@@ -249,7 +283,10 @@ def query_rag_stream():
             raw_docs = [r['text'] for r in search_results]
             # Perform Rerank
             try:
-                reranked_indices = llm_service.rerank(query_text, raw_docs, top_n=5)
+                print(f"DEBUG: Performing Rerank for {len(raw_docs)} documents...")
+                reranked_indices = llm_service.rerank(search_query, raw_docs, top_n=5)
+                print(f"DEBUG: Rerank returned indices: {reranked_indices}")
+                
                 for idx in reranked_indices:
                     result = search_results[idx]
                     meta = result['metadata']
@@ -259,7 +296,8 @@ def query_rag_stream():
                     sources.append({
                         "name": source_file,
                         "page": meta.get("chunk_id", 1),
-                        "type": source_file.split('.')[-1].lower() if '.' in source_file else 'unknown'
+                        "type": source_file.split('.')[-1].lower() if '.' in source_file else 'unknown',
+                        "image_url": meta.get("image_url")
                     })
             except Exception as e:
                 print(f"ERROR: Rerank failed: {e}")
@@ -269,6 +307,10 @@ def query_rag_stream():
                     source_file = meta.get("source_file", "Unknown")
                     context_docs.append(f"【文件：{source_file}】\n{result['text']}")
                     sources.append({"name": source_file, "page": meta.get("chunk_id", 1), "type": "unknown"})
+        
+        print(f"DEBUG: Final context_docs count: {len(context_docs)}")
+        if context_docs:
+            print(f"DEBUG: First 100 chars of top context: {context_docs[0][:100]}...")
         
         # Deduplicate sources
         unique_sources = []
@@ -288,7 +330,7 @@ def query_rag_stream():
                 stats_data = {"total_tokens": 0}
                 
                 # Then stream content
-                for chunk in llm_service.generate_stream(query_text, context_docs):
+                for chunk in llm_service.generate_stream(query_text, context_docs, history=history):
                     # Check if this is the stats dict
                     if isinstance(chunk, dict) and "__stats__" in chunk:
                         stats_data = chunk["__stats__"]
@@ -617,6 +659,24 @@ def delete_knowledge_base(kb_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/knowledge-bases/<kb_id>', methods=['PUT'])
+@require_admin
+def rename_knowledge_base(kb_id):
+    """Rename a knowledge base."""
+    data = request.json
+    new_name = data.get('name', '').strip()
+    
+    if not new_name:
+        return jsonify({"error": "Name is required"}), 400
+    
+    try:
+        kb = kb_service.rename(kb_id, new_name)
+        return jsonify(kb)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/knowledge-bases/<kb_id>/documents', methods=['GET'])
 @require_auth
 def get_kb_documents(kb_id):
@@ -652,7 +712,8 @@ def get_kb_documents(kb_id):
                         "name": filename,
                         "type": ext,
                         "size": f"{stat.st_size / 1024:.1f} KB" if stat.st_size < 1024*1024 else f"{stat.st_size / (1024*1024):.1f} MB",
-                        "date": time.strftime('%Y-%m-%d', time.localtime(stat.st_mtime)),
+                        "date": time.strftime('%Y-%m-%d %H:%M', time.localtime(stat.st_mtime)),
+                        "mtime": stat.st_mtime,  # For sorting
                         "status": "indexed",
                         "tags": doc_info["tags"],
                         "chunks": doc_info["chunks"]
@@ -673,11 +734,15 @@ def get_kb_documents(kb_id):
                         "name": filename,
                         "type": ext,
                         "size": f"{stat.st_size / 1024:.1f} KB" if stat.st_size < 1024*1024 else f"{stat.st_size / (1024*1024):.1f} MB",
-                        "date": time.strftime('%Y-%m-%d', time.localtime(stat.st_mtime)),
+                        "date": time.strftime('%Y-%m-%d %H:%M', time.localtime(stat.st_mtime)),
+                        "mtime": stat.st_mtime,  # For sorting
                         "status": "indexed",
                         "tags": doc_info["tags"],
                         "chunks": doc_info["chunks"]
                     })
+    
+    # Sort by modification time, newest first
+    files.sort(key=lambda x: x.get('mtime', 0), reverse=True)
     
     return jsonify(files)
 

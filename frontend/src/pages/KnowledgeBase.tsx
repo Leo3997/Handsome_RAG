@@ -17,7 +17,9 @@ import {
   Eye,
   Check,
   Loader2,
-  Database
+  Database,
+  Pencil,
+  MoreVertical
 } from "lucide-react"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
@@ -30,7 +32,7 @@ export default function KnowledgeBase() {
   const [uploading, setUploading] = useState(false)
   const [progress, setProgress] = useState(0)
   const [files, setFiles] = useState<any[]>([])
-  const [stats, setStats] = useState({ totalFiles: 0, indexedChunks: 0, dbSize: "Active" })
+  const [stats, setStats] = useState({ totalFiles: 0, indexedChunks: 0, totalSizeMb: 0 })
 
   // Knowledge Base State
   const [knowledgeBases, setKnowledgeBases] = useState<any[]>([])
@@ -38,6 +40,12 @@ export default function KnowledgeBase() {
   const [showKbMenu, setShowKbMenu] = useState(false)
   const [showNewKbDialog, setShowNewKbDialog] = useState(false)
   const [newKbName, setNewKbName] = useState("")
+
+  // Rename & Delete KB State
+  const [showRenameKbDialog, setShowRenameKbDialog] = useState(false)
+  const [renamingKbId, setRenamingKbId] = useState<string | null>(null)
+  const [renameKbName, setRenameKbName] = useState("")
+  const [kbActionMenuId, setKbActionMenuId] = useState<string | null>(null)
 
   // Selection & Preview State
   const [selectedFiles, setSelectedFiles] = useState<string[]>([])
@@ -56,16 +64,26 @@ export default function KnowledgeBase() {
 
   const FILE_TYPES = [
     { value: "all", label: "全部类型" },
-    { value: "pptx", label: "PPT" },
+    { value: "ppt", label: "PPT" },
     { value: "pdf", label: "PDF" },
-    { value: "docx", label: "Word" },
-    { value: "xlsx", label: "Excel" },
+    { value: "word", label: "Word" },
+    { value: "excel", label: "Excel/CSV" },
+    { value: "image", label: "图片" },
+    { value: "text", label: "文本/MD" },
   ]
 
   // Filtered files
   const filteredFiles = filterType === "all" 
     ? files 
-    : files.filter(f => f.type === filterType)
+    : files.filter(f => {
+        const type = f.type?.toLowerCase() || ""
+        if (filterType === 'image') return ['png', 'jpg', 'jpeg', 'svg', 'gif', 'webp'].includes(type)
+        if (filterType === 'excel') return ['xlsx', 'xls', 'csv'].includes(type)
+        if (filterType === 'text') return ['txt', 'md'].includes(type)
+        if (filterType === 'word') return ['docx', 'doc'].includes(type)
+        if (filterType === 'ppt') return ['pptx', 'ppt'].includes(type)
+        return type === filterType
+      })
 
   const currentKb = knowledgeBases.find(kb => kb.id === currentKbId)
 
@@ -92,14 +110,14 @@ export default function KnowledgeBase() {
     try {
       const [docs, backendStats] = await Promise.all([
         api.getKbDocuments(kbId),
-        api.getStats()
+        api.getStats(kbId)
       ])
       
       setFiles(docs)
       setStats({
         totalFiles: docs.length,
         indexedChunks: backendStats.indexed_chunks,
-        dbSize: "Active"
+        totalSizeMb: backendStats.total_size_mb || 0
       })
     } catch (error) {
       console.error("Failed to fetch data:", error)
@@ -117,6 +135,42 @@ export default function KnowledgeBase() {
     } catch (error) {
       toast.error("创建失败")
     }
+  }
+
+  const handleDeleteKb = async (kbId: string, kbName: string) => {
+    if (!confirm(`确定要删除知识库 "${kbName}" 吗？这将删除该知识库下的所有文件和数据，此操作不可撤销！`)) return
+    try {
+      await api.deleteKnowledgeBase(kbId)
+      toast.success(`知识库 "${kbName}" 已删除`)
+      setKbActionMenuId(null)
+      if (currentKbId === kbId) {
+        setCurrentKbId("default")
+      }
+      fetchKnowledgeBases()
+    } catch (error: any) {
+      toast.error(error.message || "删除失败")
+    }
+  }
+
+  const handleRenameKb = async () => {
+    if (!renamingKbId || !renameKbName.trim()) return
+    try {
+      await api.renameKnowledgeBase(renamingKbId, renameKbName)
+      toast.success("知识库已重命名")
+      setShowRenameKbDialog(false)
+      setRenamingKbId(null)
+      setRenameKbName("")
+      fetchKnowledgeBases()
+    } catch (error: any) {
+      toast.error(error.message || "重命名失败")
+    }
+  }
+
+  const openRenameDialog = (kb: any) => {
+    setRenamingKbId(kb.id)
+    setRenameKbName(kb.name)
+    setShowRenameKbDialog(true)
+    setKbActionMenuId(null)
   }
 
   const handleSaveTags = async () => {
@@ -176,60 +230,76 @@ export default function KnowledgeBase() {
   const handleUploadClick = () => {
     const input = document.createElement('input')
     input.type = 'file'
-    input.accept = ".pptx,.pdf,.docx,.txt,.xlsx"
+    input.multiple = true // Enable multi-file selection
+    input.accept = ".pptx,.pdf,.docx,.txt,.xlsx,.png,.jpg,.jpeg,.svg,.md,.csv"
     input.onchange = async (e: any) => {
-      const file = e.target.files[0]
-      if (!file) return
+      const selectedFiles = Array.from(e.target.files) as File[]
+      if (selectedFiles.length === 0) return
 
       setUploading(true)
-      setProgress(10)
+      setProgress(0)
       
-      try {
-        const res = await api.uploadFile(file)
-        
-        if (res.task_id) {
-          setProgress(30)
-          toast.info(`文件已上传，正在后台处理中...`)
+      const totalFiles = selectedFiles.length
+      let completedFiles = 0
+      let failedFiles: string[] = []
+      
+      toast.info(`开始上传 ${totalFiles} 个文件...`)
+
+      // Process files sequentially (queue)
+      for (const file of selectedFiles) {
+        try {
+          const res = await api.uploadFile(file, currentKbId)
           
-          // Poll for task status
-          const taskId = res.task_id
-          const pollInterval = setInterval(async () => {
-            try {
-              const statusRes = await api.getTaskStatus(taskId)
-              
-              if (statusRes.status === 'processing') {
-                setProgress(prev => Math.min(prev + 10, 90))
-              } else if (statusRes.status === 'completed') {
-                clearInterval(pollInterval)
-                setProgress(100)
-                toast.success(`文件 ${file.name} 处理完成！`)
-                setTimeout(() => {
-                  setUploading(false)
-                  fetchDocuments(currentKbId)
-                }, 500)
-              } else if (statusRes.status === 'failed') {
-                clearInterval(pollInterval)
-                setUploading(false)
-                toast.error(`文件处理失败: ${statusRes.error}`)
-              }
-            } catch (e) {
-              clearInterval(pollInterval)
-              setUploading(false)
-              toast.error("检查任务状态失败")
-            }
-          }, 1500)
-        } else {
-          // Fallback for synchronous processing
-          setProgress(100)
-          setTimeout(() => {
-            setUploading(false)
-            fetchDocuments(currentKbId)
-          }, 500)
+          if (res.task_id) {
+            // Wait for task to complete
+            await new Promise<void>((resolve) => {
+              const pollInterval = setInterval(async () => {
+                try {
+                  const statusRes = await api.getTaskStatus(res.task_id!)
+                  
+                  if (statusRes.status === 'completed') {
+                    clearInterval(pollInterval)
+                    completedFiles++
+                    setProgress(Math.round((completedFiles / totalFiles) * 100))
+                    toast.success(`${file.name} 处理完成`)
+                    resolve()
+                  } else if (statusRes.status === 'failed') {
+                    clearInterval(pollInterval)
+                    failedFiles.push(file.name)
+                    completedFiles++
+                    setProgress(Math.round((completedFiles / totalFiles) * 100))
+                    toast.error(`${file.name} 处理失败`)
+                    resolve()
+                  }
+                } catch {
+                  clearInterval(pollInterval)
+                  failedFiles.push(file.name)
+                  completedFiles++
+                  resolve()
+                }
+              }, 1500)
+            })
+          } else {
+            // Synchronous completion
+            completedFiles++
+            setProgress(Math.round((completedFiles / totalFiles) * 100))
+          }
+        } catch (error) {
+          console.error(`Upload Error for ${file.name}:`, error)
+          failedFiles.push(file.name)
+          completedFiles++
+          setProgress(Math.round((completedFiles / totalFiles) * 100))
         }
-      } catch (error) {
-        console.error("Upload Error:", error)
-        setUploading(false)
-        toast.error("上传失败，请重试")
+      }
+      
+      // All done
+      setUploading(false)
+      fetchDocuments(currentKbId)
+      
+      if (failedFiles.length === 0) {
+        toast.success(`全部 ${totalFiles} 个文件上传处理完成！`)
+      } else {
+        toast.warning(`${totalFiles - failedFiles.length} 个成功，${failedFiles.length} 个失败`)
       }
     }
     input.click()
@@ -255,16 +325,46 @@ export default function KnowledgeBase() {
                 {currentKb?.name || "加载中..."}
               </Button>
               {showKbMenu && (
-                <div className="absolute top-full left-0 mt-1 z-20 bg-white border border-slate-200 rounded-lg shadow-lg py-1 min-w-48">
+                <div className="absolute top-full left-0 mt-1 z-20 bg-white border border-slate-200 rounded-lg shadow-lg py-1 min-w-56">
                   {knowledgeBases.map(kb => (
-                    <button
+                    <div
                       key={kb.id}
-                      onClick={() => { setCurrentKbId(kb.id); setShowKbMenu(false); }}
-                      className={`w-full px-4 py-2 text-left text-sm hover:bg-slate-50 flex justify-between items-center ${currentKbId === kb.id ? 'text-cyan-600 font-medium bg-cyan-50' : 'text-slate-600'}`}
+                      className={`relative flex items-center justify-between px-2 py-1 hover:bg-slate-50 ${currentKbId === kb.id ? 'bg-cyan-50' : ''}`}
                     >
-                      <span>{kb.name}</span>
-                      <span className="text-[10px] text-slate-400">{kb.file_count} 文件</span>
-                    </button>
+                      <button
+                        onClick={() => { setCurrentKbId(kb.id); setShowKbMenu(false); }}
+                        className={`flex-1 px-2 py-1 text-left text-sm flex justify-between items-center ${currentKbId === kb.id ? 'text-cyan-600 font-medium' : 'text-slate-600'}`}
+                      >
+                        <span>{kb.name}</span>
+                        <span className="text-[10px] text-slate-400 ml-2">{kb.file_count} 文件</span>
+                      </button>
+                      {kb.id !== 'default' && (
+                        <div className="relative">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setKbActionMenuId(kbActionMenuId === kb.id ? null : kb.id); }}
+                            className="p-1 rounded hover:bg-slate-200 text-slate-400 hover:text-slate-600"
+                          >
+                            <MoreVertical className="h-4 w-4" />
+                          </button>
+                          {kbActionMenuId === kb.id && (
+                            <div className="absolute right-0 top-full mt-1 z-30 bg-white border border-slate-200 rounded shadow-lg py-1 min-w-28">
+                              <button
+                                onClick={() => openRenameDialog(kb)}
+                                className="w-full px-3 py-1.5 text-left text-sm text-slate-600 hover:bg-slate-50 flex items-center gap-2"
+                              >
+                                <Pencil className="h-3 w-3" /> 重命名
+                              </button>
+                              <button
+                                onClick={() => handleDeleteKb(kb.id, kb.name)}
+                                className="w-full px-3 py-1.5 text-left text-sm text-red-500 hover:bg-red-50 flex items-center gap-2"
+                              >
+                                <Trash2 className="h-3 w-3" /> 删除
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   ))}
                   <div className="border-t border-slate-100 mt-1 pt-1">
                     <button
@@ -347,10 +447,14 @@ export default function KnowledgeBase() {
           </Card>
           <Card className="shadow-sm border-slate-200 bg-white hover:border-slate-300 transition-colors cursor-default">
             <CardHeader className="pb-2">
-              <CardDescription className="text-xs uppercase tracking-wider font-semibold text-slate-400">数据库状态</CardDescription>
-              <CardTitle className="text-2xl text-cyan-600 flex items-center gap-2">
-                <div className="h-2.5 w-2.5 rounded-full bg-cyan-500 animate-pulse" />
-                {stats.dbSize}
+              <CardDescription className="text-xs uppercase tracking-wider font-semibold text-slate-400">文件占用空间</CardDescription>
+              <CardTitle className="text-2xl text-slate-900">
+                {stats.totalSizeMb < 1 
+                  ? `${(stats.totalSizeMb * 1024).toFixed(0)} KB`
+                  : stats.totalSizeMb >= 1024 
+                    ? `${(stats.totalSizeMb / 1024).toFixed(2)} GB`
+                    : `${stats.totalSizeMb.toFixed(2)} MB`
+                }
               </CardTitle>
             </CardHeader>
           </Card>
@@ -402,10 +506,12 @@ export default function KnowledgeBase() {
                     </td>
                     <td className="px-6 py-4 font-medium text-slate-900">
                       <div className="flex items-center gap-3">
-                        {file.type === 'pptx' && <Presentation className="h-5 w-5 text-orange-500" />}
+                        {(file.type === 'pptx' || file.type === 'ppt') && <Presentation className="h-5 w-5 text-orange-500" />}
                         {file.type === 'pdf' && <FileText className="h-5 w-5 text-red-500" />}
-                         {file.type === 'xlsx' && <FileSpreadsheet className="h-5 w-5 text-green-500" />}
-                        {(file.type === 'png' || file.type === 'jpg' || file.type === 'svg') && <ImageIcon className="h-5 w-5 text-blue-500" />}
+                        {(file.type === 'docx' || file.type === 'doc') && <FileText className="h-5 w-5 text-blue-500" />}
+                        {(file.type === 'xlsx' || file.type === 'xls' || file.type === 'csv') && <FileSpreadsheet className="h-5 w-5 text-green-600" />}
+                        {(['png', 'jpg', 'jpeg', 'svg', 'gif', 'webp'].includes(file.type?.toLowerCase())) && <ImageIcon className="h-5 w-5 text-blue-400" />}
+                        {(file.type === 'txt' || file.type === 'md') && <FileText className="h-5 w-5 text-slate-400" />}
                         <div className="flex flex-col">
                           <span className="truncate max-w-[300px] font-medium" title={file.name}>{file.name}</span>
                           <div className="flex flex-wrap gap-1 mt-1">
@@ -507,6 +613,28 @@ export default function KnowledgeBase() {
           <DialogFooter>
             <Button variant="outline" onClick={() => setShowNewKbDialog(false)}>取消</Button>
             <Button onClick={handleCreateKb} disabled={!newKbName.trim()}>创建</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Rename Knowledge Base Dialog */}
+      <Dialog open={showRenameKbDialog} onOpenChange={setShowRenameKbDialog}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>重命名知识库</DialogTitle>
+          </DialogHeader>
+          <div className="py-4">
+            <Input 
+              placeholder="输入新名称" 
+              value={renameKbName} 
+              onChange={(e) => setRenameKbName(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleRenameKb()}
+              autoFocus
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setShowRenameKbDialog(false); setRenamingKbId(null); }}>取消</Button>
+            <Button onClick={handleRenameKb} disabled={!renameKbName.trim()}>保存</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -93,7 +93,7 @@ export function FilePreviewDialog({ file, isOpen, onClose }: FilePreviewDialogPr
                             {previewType === 'ppt' && pptSlides.length > 0 && (
                                 <div className="relative w-full h-full flex items-center justify-center">
                                     <img 
-                                        src={`http://localhost:5000${pptSlides[currentSlideIndex]}`}
+                                        src={`/api/slides/${pptSlides[currentSlideIndex].split('/').pop()}`}
                                         className="max-w-full max-h-full object-contain"
                                     />
                                     {/* Controls */}
@@ -113,14 +113,14 @@ export function FilePreviewDialog({ file, isOpen, onClose }: FilePreviewDialogPr
 
                             {previewType === 'image' && (
                                 <img 
-                                    src={`http://localhost:5000/api/files/${encodeURIComponent(file.name)}`}
+                                    src={`/api/files/${encodeURIComponent(file.name)}`}
                                     className="max-w-full max-h-full object-contain"
                                 />
                             )}
 
                             {previewType === 'pdf' && (
                                 <iframe 
-                                    src={`http://localhost:5000/api/files/${encodeURIComponent(file.name)}`}
+                                    src={`/api/files/${encodeURIComponent(file.name)}`}
                                     className="w-full h-full border-none bg-white"
                                 />
                             )}
