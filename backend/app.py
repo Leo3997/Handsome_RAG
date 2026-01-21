@@ -17,10 +17,37 @@ app.config.from_object(Config)
 Config.init_app()
 
 llm_service = LLMService(Config())
-vector_db = VectorDB(Config(), embedding_fn=llm_service.get_embedding)
-ingestion_service = IngestionService(Config(), vector_db)
+
+# Lazy initialization for VectorDB to speed up server startup
+_vector_db = None
+
+def get_vector_db(kb_id="default"):
+    """Lazy singleton for VectorDB - connection established on first use."""
+    global _vector_db
+    if _vector_db is None:
+        print("Initializing VectorDB connection (lazy)...")
+        _vector_db = VectorDB(Config(), embedding_fn=llm_service.get_embedding, kb_id=kb_id)
+    elif kb_id != _vector_db.kb_id:
+        _vector_db.switch_kb(kb_id)
+    return _vector_db
+
+
+ingestion_service = None
 auth_service = AuthService(Config())
-kb_service = KnowledgeBaseService(Config(), vector_db)
+kb_service = None
+
+def get_ingestion_service():
+    global ingestion_service
+    if ingestion_service is None:
+        ingestion_service = IngestionService(Config(), get_vector_db())
+    return ingestion_service
+
+def get_kb_service():
+    global kb_service
+    if kb_service is None:
+        kb_service = KnowledgeBaseService(Config(), get_vector_db())
+    return kb_service
+
 require_auth, require_admin = create_auth_decorators(auth_service)
 
 @app.route('/api/slides/<path:filename>')
@@ -46,6 +73,76 @@ def serve_file(filename):
         if filename in files:
             return send_from_directory(root, filename)
     return jsonify({"error": "File not found"}), 404
+
+@app.route('/api/thumbnails/<path:filename>')
+def serve_thumbnail(filename):
+    """
+    Serve compressed thumbnail for preview.
+    Generates smaller versions of images (max 800x800, 75% quality).
+    Caches thumbnails to data/thumbnails/ directory.
+    """
+    from urllib.parse import unquote
+    from PIL import Image
+    
+    filename = unquote(filename)
+    
+    # Thumbnail cache directory
+    thumb_dir = os.path.join(Config.DATA_FOLDER, "thumbnails")
+    os.makedirs(thumb_dir, exist_ok=True)
+    
+    # Create safe thumbnail filename (preserve extension for proper MIME type)
+    thumb_filename = filename
+    thumb_path = os.path.join(thumb_dir, thumb_filename)
+    
+    # If thumbnail already exists, return it
+    if os.path.isfile(thumb_path):
+        return send_from_directory(thumb_dir, thumb_filename)
+    
+    # Find original file
+    original_path = None
+    full_path = os.path.join(Config.UPLOAD_FOLDER, filename)
+    if os.path.isfile(full_path):
+        original_path = full_path
+    else:
+        for root, dirs, files in os.walk(Config.UPLOAD_FOLDER):
+            if filename in files:
+                original_path = os.path.join(root, filename)
+                break
+    
+    if not original_path:
+        return jsonify({"error": "File not found"}), 404
+    
+    # Check if it's an image
+    ext = filename.lower().split('.')[-1] if '.' in filename else ''
+    if ext not in ['jpg', 'jpeg', 'png', 'gif', 'webp']:
+        # Non-image: return original file
+        return send_from_directory(os.path.dirname(original_path), os.path.basename(original_path))
+    
+    # Generate compressed thumbnail
+    try:
+        with Image.open(original_path) as img:
+            # Resize to max 800x800 while maintaining aspect ratio
+            img.thumbnail((800, 800), Image.Resampling.LANCZOS)
+            
+            # Ensure thumbnail directory structure exists
+            thumb_subdir = os.path.dirname(thumb_path)
+            os.makedirs(thumb_subdir, exist_ok=True)
+            
+            # Save thumbnail
+            if ext == 'png' and img.mode == 'RGBA':
+                # Keep PNG for transparency
+                img.save(thumb_path, 'PNG', optimize=True)
+            else:
+                # Convert to RGB for JPEG
+                if img.mode in ('RGBA', 'P'):
+                    img = img.convert('RGB')
+                img.save(thumb_path, 'JPEG', quality=75, optimize=True)
+        
+        return send_from_directory(thumb_dir, thumb_filename)
+    except Exception as e:
+        print(f"Thumbnail generation failed for {filename}: {e}")
+        # Fallback: return original file
+        return send_from_directory(os.path.dirname(original_path), os.path.basename(original_path))
 
 @app.route('/api/previews/<path:filename>')
 def serve_preview(filename):
@@ -105,10 +202,10 @@ def get_stats():
     kb_id = request.args.get('kb_id', 'default')
     
     # Switch to the specified knowledge base
-    vector_db.switch_kb(kb_id)
+    db = get_vector_db(kb_id)
     
     # Get chunk count for the specific KB
-    count = vector_db.get_count()
+    count = db.get_count()
     
     # Count files and calculate total size for the specific KB
     file_count = 0
@@ -116,7 +213,7 @@ def get_stats():
     
     if kb_id == 'default':
         # For default KB, count recursively but exclude other KB directories
-        other_kb_ids = [kb['id'] for kb in kb_service.list_all() if kb['id'] != 'default']
+        other_kb_ids = [kb['id'] for kb in get_kb_service().list_all() if kb['id'] != 'default']
         for root, dirs, files in os.walk(Config.UPLOAD_FOLDER):
             # Exclude other KB directories
             dirs[:] = [d for d in dirs if d not in other_kb_ids]
@@ -157,19 +254,19 @@ def query_rag():
         return jsonify({"error": "No query provided"}), 400
     
     # Switch to the specified knowledge base
-    vector_db.switch_kb(kb_id)
+    db = get_vector_db(kb_id)
     
     # Contextual Query Rewriting
     search_query = llm_service.rewrite_query(query_text, history)
 
-    search_results = vector_db.query(search_query, n_results=20) # Get more candidates
+    search_results = db.query(search_query, n_results=20) # Get more candidates
     context_docs = []
     sources = []
     
     # Intent detection: list files
     list_keywords = ["列出", "哪些文件", "什么文件", "所有文件", "file list", "list files", "有", "什么内容", "文件库", "库里", "库中", "show me files", "files you have"]
     if any(k in query_text for k in list_keywords):
-        all_files = vector_db.get_all_filenames()
+        all_files = db.get_all_filenames()
         if all_files:
             file_list_str = "\n".join([f"- {f}" for f in all_files])
             system_msg = f"【系统提示】这是当前知识库（ID: {kb_id}）中所有已索引文件的完整列表（共{len(all_files)}个）：\n{file_list_str}\n请基于此列表回答用户关于库中文件的问题。"
@@ -244,7 +341,7 @@ def query_rag_stream():
         
         # Switch to the specified knowledge base
         try:
-            vector_db.switch_kb(kb_id)
+            db = get_vector_db(kb_id)
         except Exception as e:
             print(f"ERROR: Failed to switch to KB '{kb_id}': {e}")
             return jsonify({"error": f"Failed to access knowledge base: {str(e)}"}), 500
@@ -254,7 +351,7 @@ def query_rag_stream():
 
         # 1. Retrieval
         try:
-            search_results = vector_db.query(search_query, n_results=20)
+            search_results = db.query(search_query, n_results=20)
             print(f"DEBUG: VectorDB returned {len(search_results)} results for rewritten query '{search_query[:30]}'")
         except Exception as e:
             print(f"ERROR: Vector query failed: {e}")
@@ -269,7 +366,7 @@ def query_rag_stream():
         list_keywords = ["列出", "哪些文件", "什么文件", "所有文件", "file list", "list files", "有", "什么内容", "文件库", "库里", "库中", "show me files", "files you have"]
         if any(k in query_text for k in list_keywords):
             try:
-                all_files = vector_db.get_all_filenames()
+                all_files = db.get_all_filenames()
                 if all_files:
                     file_list_str = "\n".join([f"- {f}" for f in all_files])
                     system_msg = f"【系统提示】这是当前知识库（ID: {kb_id}）中所有已索引文件的完整列表（共{len(all_files)}个）：\n{file_list_str}\n请依据此列表告知用户库内文件情况。"
@@ -357,7 +454,7 @@ def query_rag_stream():
 def get_text_preview(filename):
     print(f"DEBUG: get_text_preview called for {filename}")
     try:
-        content = vector_db.get_file_content(filename)
+        content = get_vector_db().get_file_content(filename)
         print(f"DEBUG: content length: {len(content)}")
         return jsonify({"content": content})
     except Exception as e:
@@ -371,7 +468,7 @@ def global_search():
         return jsonify({"results": []})
     
     try:
-        results = vector_db.query(query, n_results=20)
+        results = get_vector_db().query(query, n_results=20)
         formatted = []
         for r in results:
             meta = r.get('metadata', {})
@@ -399,7 +496,9 @@ def get_ppt_preview(filename):
         filename_no_ext = os.path.splitext(filename)[0]
         slides_dir = Config.SLIDES_FOLDER
         
-        pattern = os.path.join(slides_dir, f"{filename_no_ext}_slide_*.jpg")
+        # Escape the filename prefix for glob to handle special characters like '[' and ']'
+        safe_prefix = glob.escape(filename_no_ext)
+        pattern = os.path.join(slides_dir, f"{safe_prefix}_slide_*.jpg")
         print(f"DEBUG: looking for slides with pattern: {pattern}")
         slide_files = glob.glob(pattern)
         print(f"DEBUG: found {len(slide_files)} slides")
@@ -451,7 +550,7 @@ def delete_files_batch():
         try:
             # Standard cleanup logic (reused from single delete)
             # 1. Delete from VectorDB
-            vector_db.delete_document(filename)
+            get_vector_db().delete_document(filename)
             
             # 2. Delete actual file (Search and Destroy)
             file_deleted = False
@@ -490,8 +589,8 @@ def delete_file(filename):
         
     try:
         # 1. Switch to correct KB and Delete from VectorDB
-        vector_db.switch_kb(kb_id)
-        vector_db.delete_document(filename)
+        db = get_vector_db(kb_id)
+        db.delete_document(filename)
         
         # 2. Delete actual file (Search and Destroy)
         file_deleted = False
@@ -537,15 +636,15 @@ def background_ingestion_task(task_id, file_path, kb_id="default"):
     try:
         TASKS[task_id]['status'] = 'processing'
         # Force switch vector_db to the correct KB for this background thread
-        vector_db.switch_kb(kb_id)
-        result = ingestion_service.process_file(file_path)
+        get_vector_db(kb_id)
+        result = get_ingestion_service().process_file(file_path)
         
         TASKS[task_id].update({
             'status': 'completed',
             'result': result
         })
         # Update file count
-        kb_service.update_file_count(kb_id)
+        get_kb_service().update_file_count(kb_id)
         print(f"Ingestion completed for {filename}")
     except Exception as e:
         print(f"Ingestion failed for {filename}: {e}")
@@ -567,7 +666,7 @@ def upload_file():
     kb_id = request.form.get('kb_id', 'default')
     
     # Validate KB exists
-    kb = kb_service.get(kb_id)
+    kb = get_kb_service().get(kb_id)
     if not kb:
         return jsonify({"error": f"Knowledge base '{kb_id}' not found"}), 404
     
@@ -628,7 +727,7 @@ def update_config():
 @require_auth
 def list_knowledge_bases():
     """List all knowledge bases."""
-    return jsonify(kb_service.list_all())
+    return jsonify(get_kb_service().list_all())
 
 @app.route('/api/knowledge-bases', methods=['POST'])
 @require_admin
@@ -642,7 +741,7 @@ def create_knowledge_base():
         return jsonify({"error": "Name is required"}), 400
     
     try:
-        kb = kb_service.create(name, description)
+        kb = get_kb_service().create(name, description)
         return jsonify(kb), 201
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -652,7 +751,7 @@ def create_knowledge_base():
 def delete_knowledge_base(kb_id):
     """Delete a knowledge base and all its data."""
     try:
-        kb_service.delete(kb_id)
+        get_kb_service().delete(kb_id)
         return jsonify({"message": f"Knowledge base '{kb_id}' deleted"})
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -670,7 +769,7 @@ def rename_knowledge_base(kb_id):
         return jsonify({"error": "Name is required"}), 400
     
     try:
-        kb = kb_service.rename(kb_id, new_name)
+        kb = get_kb_service().rename(kb_id, new_name)
         return jsonify(kb)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -681,17 +780,17 @@ def rename_knowledge_base(kb_id):
 @require_auth
 def get_kb_documents(kb_id):
     """Get documents in a specific knowledge base."""
-    kb = kb_service.get(kb_id)
+    kb = get_kb_service().get(kb_id)
     if not kb:
         return jsonify({"error": "Knowledge base not found"}), 404
     
     # Get files
     files = []
-    other_kb_ids = [kb['id'] for kb in kb_service.list_all() if kb['id'] != 'default']
+    other_kb_ids = [kb['id'] for kb in get_kb_service().list_all() if kb['id'] != 'default']
     
     # Pre-fetch stats for all documents in this KB to avoid N+1 queries
-    vector_db.switch_kb(kb_id)
-    all_stats = vector_db.get_all_docs_stats()
+    db = get_vector_db(kb_id)
+    all_stats = db.get_all_docs_stats()
     
     if kb_id == 'default':
         # Recursive scan for default KB
@@ -757,8 +856,8 @@ def update_document_tags():
     if not filename:
         return jsonify({"error": "Filename is required"}), 400
         
-    vector_db.switch_kb(kb_id)
-    success = vector_db.update_document_tags(filename, tags)
+    db = get_vector_db(kb_id)
+    success = db.update_document_tags(filename, tags)
     if success:
         return jsonify({"message": f"Tags updated for {filename}"})
     return jsonify({"error": "Failed to update tags"}), 500

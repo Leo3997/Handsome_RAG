@@ -3,6 +3,8 @@ import { DashboardLayout } from "@/components/layout/DashboardLayout"
 import { Card, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { CardGridSkeleton } from "@/components/ui/skeleton"
+import { useDocuments } from "@/hooks/useApi"
 import {
   Dialog,
   DialogContent,
@@ -59,14 +61,11 @@ const getIcon = (type: string) => {
 export default function Assets() {
   const { isAdmin } = useAuth()
   
-  const [files, setFiles] = useState<any[]>([])
+  // 使用 SWR hook 进行数据缓存
+  const { documents: files, isLoading, refresh: refreshFiles } = useDocuments()
   const [filteredFiles, setFilteredFiles] = useState<any[]>([])
   const [selectedFile, setSelectedFile] = useState<any>(null)
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
-
-  useEffect(() => {
-    fetchDocuments()
-  }, [])
 
   useEffect(() => {
     setFilteredFiles(files)
@@ -77,15 +76,6 @@ export default function Assets() {
       setFilteredFiles(files)
     } else {
       setFilteredFiles(files.filter(f => f.name.toLowerCase().includes(query.toLowerCase())))
-    }
-  }
-
-  const fetchDocuments = async () => {
-    try {
-      const docs = await api.getDocuments()
-      setFiles(docs)
-    } catch (error) {
-      console.error("Failed to fetch documents:", error)
     }
   }
 
@@ -144,12 +134,29 @@ export default function Assets() {
       
       // 1. PPT
       if (['ppt', 'pptx'].includes(type) && selectedPPT) {
-          // Fix: Use absolute URL for backend images
+          if (isLoadingSlides) {
+              return <div className="text-white/50">正在加载幻灯片...</div>
+          }
+          
+          if (!selectedPPT.slides || selectedPPT.slides.length === 0) {
+              return (
+                  <div className="text-center text-white/70">
+                      <Presentation className="h-20 w-20 mx-auto mb-4 opacity-50" />
+                      <p>未发现幻灯片图像。该文件可能正在处理中或处理失败。</p>
+                      <a href={`/api/files/${selectedFile?.name}`} download target="_blank" className="mt-4 inline-block">
+                          <Button variant="secondary">下载原文件</Button>
+                      </a>
+                  </div>
+              )
+          }
+
+          const currentSlide = selectedPPT.slides[currentSlideIndex]
+          if (!currentSlide) return <div className="text-white/50">幻灯片加载错误</div>
+
           return (
-             isLoadingSlides ? <div className="text-white/50">正在加载幻灯片...</div> :
              <>
                 <img 
-                src={`http://localhost:5000/api/slides/${selectedPPT.slides[currentSlideIndex].split('/').pop()}`} 
+                src={`/api/slides/${currentSlide.split('/').pop()}`} 
                 className="max-h-full max-w-full object-contain shadow-2xl"
                 />
                 <Button variant="ghost" className="absolute left-4 top-1/2 -translate-y-1/2 text-white/50 hover:text-white hover:bg-white/10 h-12 w-12 rounded-full p-0" 
@@ -163,12 +170,12 @@ export default function Assets() {
       // 2. Image
       if (['png', 'jpg', 'jpeg', 'svg'].includes(type)) {
           // Fix: Use absolute URL
-          return <img src={`http://localhost:5000/api/files/${selectedFile.name}`} className="max-h-full max-w-full object-contain" />
+          return <img src={`/api/files/${selectedFile.name}`} className="max-h-full max-w-full object-contain" />
       }
 
       // 3. PDF (Iframe)
       if (type === 'pdf') {
-          return <iframe src={`http://localhost:5000/api/files/${selectedFile.name}`} className="w-full h-full bg-white rounded" />
+          return <iframe src={`/api/files/${selectedFile.name}`} className="w-full h-full bg-white rounded" />
       }
 
       // 4. Text/Office (Text Preview)
@@ -177,7 +184,7 @@ export default function Assets() {
               <div className="w-full h-full max-w-4xl bg-white rounded-lg p-8 overflow-y-auto text-slate-800">
                   <div className="flex justify-between items-center mb-6 pb-4 border-b border-slate-100">
                       <h2 className="text-lg font-bold">文档内容预览</h2>
-                      <a href={`http://localhost:5000/api/files/${selectedFile.name}`} download target="_blank">
+                      <a href={`/api/files/${selectedFile.name}`} download target="_blank">
                           <Button size="sm" className="gap-2"><Download className="h-4 w-4"/> 下载原文件</Button>
                       </a>
                   </div>
@@ -197,7 +204,7 @@ export default function Assets() {
           <div className="text-center text-white/70">
                <FileText className="h-20 w-20 mx-auto mb-4 opacity-50" />
                <p>该格式暂不支持在线预览。</p>
-               <a href={`http://localhost:5000/api/files/${selectedFile?.name}`} download target="_blank" className="mt-4 inline-block">
+               <a href={`/api/files/${selectedFile?.name}`} download target="_blank" className="mt-4 inline-block">
                    <Button variant="secondary">下载文件</Button>
                </a>
           </div>
@@ -213,16 +220,19 @@ export default function Assets() {
             </div>
 
         {/* Gallery Grid */}
-        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-6">
-          {filteredFiles.map((file) => (
+        {isLoading ? (
+          <CardGridSkeleton count={10} />
+        ) : (
+          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-6">
+            {filteredFiles.map((file) => (
             <div key={file.id} className="group relative">
                <Card className="overflow-hidden hover:shadow-lg transition-all duration-300 border-slate-200 cursor-pointer" onClick={() => handlePreview(file)}>
                   
                   {/* Thumbnail Area */}
                   <div className={`aspect-[4/3] flex items-center justify-center ${getThumbnailBg(file.type)}`}>
-                      {/* If it's an image, show actual preview, else show Icon */}
+                      {/* If it's an image, show thumbnail preview, else show Icon */}
                       {['png', 'jpg', 'jpeg', 'svg'].includes(file.type) ? (
-                          <img src={`http://localhost:5000/api/files/${file.name}`} alt={file.name} className="w-full h-full object-cover" 
+                          <img src={`/api/thumbnails/${file.name}`} alt={file.name} className="w-full h-full object-cover" 
                                onError={(e) => { e.currentTarget.style.display='none' }}/> 
                       ) : (
                           <div className="transform group-hover:scale-110 transition-transform duration-300 opacity-80 group-hover:opacity-100">
@@ -269,7 +279,8 @@ export default function Assets() {
                </Card>
             </div>
           ))}
-        </div>
+          </div>
+        )}
       </div>
 
       {/* Delete Confirmation Dialog */}
@@ -288,7 +299,7 @@ export default function Assets() {
               onClick={() => {
                 if (deleteTarget) {
                   api.deleteFile(deleteTarget).then(() => {
-                    setFiles(prev => prev.filter(f => f.name !== deleteTarget));
+                    refreshFiles();  // 刷新 SWR 缓存
                     toast.success(`文件 "${deleteTarget}" 已删除`);
                     setDeleteTarget(null);
                   }).catch(() => {
@@ -335,7 +346,7 @@ export default function Assets() {
                               onClick={() => setCurrentSlideIndex(idx)}
                               className={`h-14 aspect-[4/3] rounded overflow-hidden cursor-pointer border-2 transition-all ${idx === currentSlideIndex ? 'border-cyan-500 opacity-100' : 'border-transparent opacity-50 hover:opacity-100'}`}>
                              {/* Fix: Use absolute URL */}
-                             <img src={`http://localhost:5000/api/slides/${slide.split('/').pop()}`} className="w-full h-full object-cover" />
+                             <img src={`/api/slides/${slide.split('/').pop()}`} className="w-full h-full object-cover" />
                          </div>
                      ))}
                  </div>

@@ -4,6 +4,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
+import { TableSkeleton, StatsCardsSkeleton } from "@/components/ui/skeleton"
 import { 
   FileUp, 
   FileText, 
@@ -33,6 +34,7 @@ export default function KnowledgeBase() {
   const [progress, setProgress] = useState(0)
   const [files, setFiles] = useState<any[]>([])
   const [stats, setStats] = useState({ totalFiles: 0, indexedChunks: 0, totalSizeMb: 0 })
+  const [isLoading, setIsLoading] = useState(true)
 
   // Knowledge Base State
   const [knowledgeBases, setKnowledgeBases] = useState<any[]>([])
@@ -107,6 +109,7 @@ export default function KnowledgeBase() {
   }
 
   const fetchDocuments = async (kbId: string) => {
+    setIsLoading(true)
     try {
       const [docs, backendStats] = await Promise.all([
         api.getKbDocuments(kbId),
@@ -121,6 +124,8 @@ export default function KnowledgeBase() {
       })
     } catch (error) {
       console.error("Failed to fetch data:", error)
+    } finally {
+      setIsLoading(false)
     }
   }
 
@@ -431,49 +436,59 @@ export default function KnowledgeBase() {
           </Card>
         )}
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {/* Stats Cards */}
-          <Card className="shadow-sm border-slate-200 bg-white hover:border-slate-300 transition-colors cursor-default">
-            <CardHeader className="pb-2">
-              <CardDescription className="text-xs uppercase tracking-wider font-semibold text-slate-400">总文件数</CardDescription>
-              <CardTitle className="text-2xl text-slate-900">{stats.totalFiles}</CardTitle>
-            </CardHeader>
-          </Card>
-          <Card className="shadow-sm border-slate-200 bg-white hover:border-slate-300 transition-colors cursor-default">
-            <CardHeader className="pb-2">
-              <CardDescription className="text-xs uppercase tracking-wider font-semibold text-slate-400">已索引片段</CardDescription>
-              <CardTitle className="text-2xl text-slate-900">{stats.indexedChunks}</CardTitle>
-            </CardHeader>
-          </Card>
-          <Card className="shadow-sm border-slate-200 bg-white hover:border-slate-300 transition-colors cursor-default">
-            <CardHeader className="pb-2">
-              <CardDescription className="text-xs uppercase tracking-wider font-semibold text-slate-400">文件占用空间</CardDescription>
-              <CardTitle className="text-2xl text-slate-900">
-                {stats.totalSizeMb < 1 
-                  ? `${(stats.totalSizeMb * 1024).toFixed(0)} KB`
-                  : stats.totalSizeMb >= 1024 
-                    ? `${(stats.totalSizeMb / 1024).toFixed(2)} GB`
-                    : `${stats.totalSizeMb.toFixed(2)} MB`
-                }
-              </CardTitle>
-            </CardHeader>
-          </Card>
-        </div>
+        {/* Stats Cards */}
+        {isLoading ? (
+          <StatsCardsSkeleton />
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            <Card className="shadow-sm border-slate-200 bg-white hover:border-slate-300 transition-colors cursor-default">
+              <CardHeader className="pb-2">
+                <CardDescription className="text-xs uppercase tracking-wider font-semibold text-slate-400">总文件数</CardDescription>
+                <CardTitle className="text-2xl text-slate-900">{stats.totalFiles}</CardTitle>
+              </CardHeader>
+            </Card>
+            <Card className="shadow-sm border-slate-200 bg-white hover:border-slate-300 transition-colors cursor-default">
+              <CardHeader className="pb-2">
+                <CardDescription className="text-xs uppercase tracking-wider font-semibold text-slate-400">已索引片段</CardDescription>
+                <CardTitle className="text-2xl text-slate-900">{stats.indexedChunks}</CardTitle>
+              </CardHeader>
+            </Card>
+            <Card className="shadow-sm border-slate-200 bg-white hover:border-slate-300 transition-colors cursor-default">
+              <CardHeader className="pb-2">
+                <CardDescription className="text-xs uppercase tracking-wider font-semibold text-slate-400">文件占用空间</CardDescription>
+                <CardTitle className="text-2xl text-slate-900">
+                  {stats.totalSizeMb < 1 
+                    ? `${(stats.totalSizeMb * 1024).toFixed(0)} KB`
+                    : stats.totalSizeMb >= 1024 
+                      ? `${(stats.totalSizeMb / 1024).toFixed(2)} GB`
+                      : `${stats.totalSizeMb.toFixed(2)} MB`
+                  }
+                </CardTitle>
+              </CardHeader>
+            </Card>
+          </div>
+        )}
 
-        <Card className="shadow-sm border-slate-200 overflow-hidden bg-white">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm text-left border-collapse">
-              <thead className="bg-slate-50 text-slate-500 font-medium border-b border-slate-200">
-                <tr>
-                  <th className="px-6 py-4 w-10">
-                    <div 
-                      onClick={toggleSelectAll}
-                      className={`h-5 w-5 rounded border flex items-center justify-center transition-all cursor-pointer ${
-                        selectedFiles.length === files.length && files.length > 0
-                        ? 'bg-slate-900 border-slate-900' 
-                        : 'bg-white border-slate-300 hover:border-slate-400'
-                      }`}
-                    >
+        {/* File Table */}
+        {isLoading ? (
+          <Card className="shadow-sm border-slate-200 overflow-hidden bg-white">
+            <TableSkeleton rows={5} />
+          </Card>
+        ) : (
+          <Card className="shadow-sm border-slate-200 overflow-hidden bg-white">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm text-left border-collapse">
+                <thead className="bg-slate-50 text-slate-500 font-medium border-b border-slate-200">
+                  <tr>
+                    <th className="px-6 py-4 w-10">
+                      <div 
+                        onClick={toggleSelectAll}
+                        className={`h-5 w-5 rounded border flex items-center justify-center transition-all cursor-pointer ${
+                          selectedFiles.length === files.length && files.length > 0
+                          ? 'bg-slate-900 border-slate-900' 
+                          : 'bg-white border-slate-300 hover:border-slate-400'
+                        }`}
+                      >
                       {selectedFiles.length === files.length && files.length > 0 && <Check className="h-3 w-3 text-white" />}
                     </div>
                   </th>
@@ -588,6 +603,7 @@ export default function KnowledgeBase() {
             )}
           </div>
         </Card>
+        )}
       </div>
 
       <FilePreviewDialog 

@@ -437,19 +437,23 @@ export default function ChatView() {
 
                     {/* Main Image */}
                     <div className="relative w-full h-full flex items-center justify-center p-4">
-                          <img 
-                            src={selectedPPT.slides[currentSlideIndex].startsWith('http') 
-                                ? selectedPPT.slides[currentSlideIndex].replace('http://localhost:5000', '/api') 
-                                : `/api/slides/${selectedPPT.slides[currentSlideIndex].split('/').pop()}`} 
-                            alt={`Slide ${currentSlideIndex + 1}`}
-                            className="max-h-[75vh] w-auto object-contain rounded-sm shadow-2xl"
-                         />
+                        {selectedPPT.slides.length > 0 && selectedPPT.slides[currentSlideIndex] ? (
+                           <img 
+                             src={selectedPPT.slides[currentSlideIndex].startsWith('http') 
+                                 ? selectedPPT.slides[currentSlideIndex].replace(/https?:\/\/[^\/]+/, '') 
+                                 : `/api/slides/${selectedPPT.slides[currentSlideIndex].split('/').pop()}`} 
+                             alt={`Slide ${currentSlideIndex + 1}`}
+                             className="max-h-[75vh] w-auto object-contain rounded-sm shadow-2xl"
+                          />
+                        ) : (
+                           <div className="text-white/50">无可用幻灯片</div>
+                        )}
                     </div>
 
                     {/* Controls */}
                     <button 
                         onClick={prevSlide}
-                        disabled={currentSlideIndex === 0}
+                        disabled={currentSlideIndex === 0 || selectedPPT.slides.length === 0}
                         className="absolute left-4 top-1/2 -translate-y-1/2 p-2 rounded-full bg-white/10 hover:bg-white/20 text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all"
                     >
                         <ChevronLeft className="h-8 w-8" />
@@ -457,7 +461,7 @@ export default function ChatView() {
 
                     <button 
                         onClick={nextSlide}
-                        disabled={currentSlideIndex === selectedPPT.slides.length - 1}
+                        disabled={currentSlideIndex === selectedPPT.slides.length - 1 || selectedPPT.slides.length === 0}
                         className="absolute right-4 top-1/2 -translate-y-1/2 p-2 rounded-full bg-white/10 hover:bg-white/20 text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all"
                     >
                         <ChevronRight className="h-8 w-8" />
