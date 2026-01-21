@@ -1,0 +1,16 @@
+[
+  {
+    "id": "default",
+    "name": "默认知识库",
+    "description": "系统默认知识库",
+    "created_at": "2026-01-19T00:00:00Z",
+    "file_count": 142
+  },
+  {
+    "id": "kb_d1f38d8f",
+    "name": "模型算法",
+    "description": "",
+    "created_at": "2026-01-20T11:55:19.103966",
+    "file_count": 0
+  }
+]

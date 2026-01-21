@@ -1,0 +1,62 @@
+services:
+  weaviate:
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - '8080'
+      - --scheme
+      - http
+    image: semitechnologies/weaviate:1.29.0
+    ports:
+      - 8081:8080
+      - 50051:50051
+    volumes:
+      - weaviate_data:/var/lib/weaviate
+    restart: always
+    environment:
+      QUERY_DEFAULTS_LIMIT: 25
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: 'true'
+      PERSISTENCE_DATA_PATH: '/var/lib/weaviate'
+      DEFAULT_VECTORIZER_MODULE: 'none'
+      ENABLE_MODULES: ''
+      CLUSTER_HOSTNAME: 'node1'
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "5174:5174"
+    volumes:
+      - ./backend:/app
+      - ./data:/app/data
+      - ./file:/app/file
+      - ./knowledge_bases.json:/app/knowledge_bases.json
+      - ./users.json:/app/users.json
+    environment:
+      - FLASK_ENV=production
+      - FLASK_DEBUG=0
+    restart: always
+    depends_on:
+      - weaviate
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5174/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./dist:/usr/share/nginx/html
+    restart: always
+    depends_on:
+      - backend
+
+volumes:
+  weaviate_data:
