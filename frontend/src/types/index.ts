@@ -78,11 +78,23 @@ export interface ConfigSettings {
  */
 export interface TaskStatus {
   id: string;
-  filename: string;
-  status: 'pending' | 'processing' | 'completed' | 'failed';
-  startTime: number;
+  filename?: string;
+  status: 'pending' | 'started' | 'processing' | 'completed' | 'failed' | 'success' | 'failure';
+  startTime?: number;
   result?: any;
   error?: string;
+}
+
+export interface UploadTask {
+  id: string; // Internal UUID or Task ID from backend
+  file: File;
+  filename: string;
+  kbId: string;
+  status: 'queue' | 'uploading' | 'processing' | 'completed' | 'failed';
+  progress: number; // 0-100
+  taskId?: string; // Celery task ID
+  error?: string;
+  createdAt: number;
 }
 
 /**

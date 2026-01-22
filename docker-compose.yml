@@ -22,11 +22,12 @@ services:
       ENABLE_MODULES: ''
       CLUSTER_HOSTNAME: 'node1'
 
-  redis:
-    image: redis:7.0-alpine
-    ports:
-      - "6379:6379"
-    restart: always
+  # 使用宿主机已有的 Redis，不再启动 Docker Redis
+  # redis:
+  #   image: redis:7.0-alpine
+  #   ports:
+  #     - "6379:6379"
+  #   restart: always
 
   backend:
     build:
@@ -43,6 +44,13 @@ services:
     environment:
       - FLASK_ENV=production
       - FLASK_DEBUG=0
+      - WEAVIATE_HOST=weaviate
+      - WEAVIATE_PORT=8080
+      - WEAVIATE_GRPC_PORT=50051
+      - CELERY_BROKER_URL=redis://host.docker.internal:6379
+      - CELERY_RESULT_BACKEND=redis://host.docker.internal:6379
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: always
     depends_on:
       - weaviate

@@ -212,39 +212,48 @@ class LLMService:
             print(f"Rerank Exception: {str(e)}. Falling back.")
             return list(range(min(len(documents), top_n)))
 
+    def fuzzy_correct_query(self, query):
+        """
+        使用拼音进行模糊纠错，容忍用户输入错别字。
+        例如："AI温书" -> 可能匹配 "AI问数"
+        """
+        try:
+            from pypinyin import lazy_pinyin
+            # 返回拼音版本供后续匹配
+            pinyin_query = ''.join(lazy_pinyin(query))
+            return query, pinyin_query
+        except ImportError:
+            return query, query
+    
     def rewrite_query(self, query, history):
         """
         Rewrites the user query to be standalone based on conversation history.
+        Also performs fuzzy correction for typos.
         """
+        # 先进行拼音纠错
+        original_query, pinyin_query = self.fuzzy_correct_query(query)
+        
         if not history:
             return query
             
         history_text = "\n".join([f"{'User' if m['role']=='user' else 'Assistant'}: {m['content']}" for m in history[-5:]])
         
-        prompt = f"""You are a keyword extractor. Given the conversation history and a new user message, extract ONLY the core search entities and intent. 
-Strictly NO conversational filler, NO reasoning about why the user is asking, and NO assumptions about failure. 
-Keep the language of keywords the same as the user message (usually Chinese).
+        prompt = f"""你是一个查询纠错和关键词提取器。请完成以下任务：
 
-# Examples:
-History: 
-User: "Help me find documents about RAG"
-Assistant: "Found 2 files."
-New user query: "Tell me more about the first one"
-Standalone query: "RAG document content"
+1. **纠错**：如果用户输入包含错别字或拼音相近的词，请纠正为正确的专业术语。
+   - 例如："AI温书" → "AI问数"，"数据仑库" → "数据仓库"
+2. **提取关键词**：从对话历史中提取核心搜索实体。
 
-History: 
-New user query: "你能看到这个吗能耗优化代码解析.docx"
-Standalone query: "能耗优化代码解析.docx"
-
-# Actual Task:
-History:
+# 对话历史：
 {history_text}
 
-New user query: {query}
-Standalone query:"""
+# 用户原始输入：{query}
+# 拼音参考：{pinyin_query}
+
+# 输出纠正后的独立查询（仅输出关键词，不要解释）："""
 
         messages = [
-            {'role': 'system', 'content': 'You are a query rewriter for a RAG system.'},
+            {'role': 'system', 'content': 'You are a query corrector and keyword extractor for Chinese RAG system.'},
             {'role': 'user', 'content': prompt}
         ]
 
@@ -340,24 +349,26 @@ Category:"""
             history_text = "\n".join([f"{'用户' if m['role']=='user' else '助手'}: {m['content']}" for m in history[-5:]])
             history_text = f"### 最近对话历史：\n{history_text}\n\n"
 
-        prompt = f"""你是一个专业、博学且严谨的企业知识库助手。
-{history_text}请基于以下提供的【参考资料】回答用户当前的提问。如果资料充足，请务必提供详尽、深入且具有洞察力的回答。
+        prompt = f"""你是一个简洁高效的企业知识库助手。
+{history_text}请基于以下【参考资料】回答用户问题。
 
-### 回答要求：
-1. **内容详实**：请展开详述资料中的知识点，包括但不限于概念解说、操作流程、关键指标或对比分析。鼓励输出长篇幅、高质量的内容。
-2. **结构化输出**：使用清晰的段落、标题和列表来组织您的回复，增强可读性。
-3. **精准推荐与引用**：
-   - 识别出最相关的文件名，并说明推荐理由。
-   - 在回答中强制使用 [1]、[2] 等数字标记引用对应的资料片段。
-4. **诚实原则**：如果资料中完全没有相关信息，请直接告知，不要编造。
+### 回答要求（务必遵守）：
+1. **简明扼要**：直接给出答案，避免冗长铺垫和重复内容。
+2. **输出结构**：
+   - **相关文件**：列出最相关的文件名（1-3个）
+   - **关键代码/内容**：如有代码片段，直接展示核心部分
+   - **技术栈/要点**：简短列出涉及的技术或核心概念
+   - **综合分析**：用2-3句话总结要点
+3. **引用标记**：使用 [1]、[2] 标记引用来源
+4. **诚实原则**：资料中无相关信息时直接说明
 
 ### 参考资料：
 {context_text}
 
-### 用户当前问题：
+### 用户问题：
 {query}
 
-### 建议回答（请尽可能详细）："""
+### 回答："""
 
         messages = [
             {'role': 'system', 'content': '你是一个善于分析资料并给出精准建议的AI助手。'},

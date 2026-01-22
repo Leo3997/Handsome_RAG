@@ -1,6 +1,7 @@
 import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar"
 import { AppSidebar } from "./AppSidebar"
 import { Search } from "lucide-react"
+import { GlobalUploadPanel } from "../GlobalUploadPanel"
 
 import { useNavigate } from "react-router-dom"
 
@@ -50,6 +51,7 @@ export function DashboardLayout({ children, onSearch }: { children: React.ReactN
               {children}
             </div>
           </div>
+          <GlobalUploadPanel />
         </main>
       </div>
     </SidebarProvider>

@@ -1,9 +1,8 @@
 import { useState, useEffect } from "react"
 import { DashboardLayout } from "@/components/layout/DashboardLayout"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { Progress } from "@/components/ui/progress"
 import { TableSkeleton, StatsCardsSkeleton } from "@/components/ui/skeleton"
 import { 
   FileUp, 
@@ -26,13 +25,13 @@ import {
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { toast } from "sonner"
+import { useUpload } from "@/context/UploadContext"
 
 import { api } from "@/lib/api"
 import { FilePreviewDialog } from "@/components/FilePreviewDialog"
 
 export default function KnowledgeBase() {
-  const [uploading, setUploading] = useState(false)
-  const [progress, setProgress] = useState(0)
+  const { uploadFiles, activeCount } = useUpload()
   const [files, setFiles] = useState<any[]>([])
   const [stats, setStats] = useState({ totalFiles: 0, indexedChunks: 0, totalSizeMb: 0 })
   const [isLoading, setIsLoading] = useState(true)
@@ -268,75 +267,10 @@ export default function KnowledgeBase() {
     input.type = 'file'
     input.multiple = true // Enable multi-file selection
     input.accept = ".pptx,.pdf,.docx,.txt,.xlsx,.png,.jpg,.jpeg,.svg,.md,.csv"
-    input.onchange = async (e: any) => {
+    input.onchange = (e: any) => {
       const selectedFiles = Array.from(e.target.files) as File[]
       if (selectedFiles.length === 0) return
-
-      setUploading(true)
-      setProgress(0)
-      
-      const totalFiles = selectedFiles.length
-      let completedFiles = 0
-      let failedFiles: string[] = []
-      
-      toast.info(`开始上传 ${totalFiles} 个文件...`)
-
-      // Process files sequentially (queue)
-      for (const file of selectedFiles) {
-        try {
-          const res = await api.uploadFile(file, currentKbId)
-          
-          if (res.task_id) {
-            // Wait for task to complete
-            await new Promise<void>((resolve) => {
-              const pollInterval = setInterval(async () => {
-                try {
-                  const statusRes = await api.getTaskStatus(res.task_id!)
-                  
-                  if (statusRes.status === 'completed') {
-                    clearInterval(pollInterval)
-                    completedFiles++
-                    setProgress(Math.round((completedFiles / totalFiles) * 100))
-                    toast.success(`${file.name} 处理完成`)
-                    resolve()
-                  } else if (statusRes.status === 'failed') {
-                    clearInterval(pollInterval)
-                    failedFiles.push(file.name)
-                    completedFiles++
-                    setProgress(Math.round((completedFiles / totalFiles) * 100))
-                    toast.error(`${file.name} 处理失败`)
-                    resolve()
-                  }
-                } catch {
-                  clearInterval(pollInterval)
-                  failedFiles.push(file.name)
-                  completedFiles++
-                  resolve()
-                }
-              }, 1500)
-            })
-          } else {
-            // Synchronous completion
-            completedFiles++
-            setProgress(Math.round((completedFiles / totalFiles) * 100))
-          }
-        } catch (error) {
-          console.error(`Upload Error for ${file.name}:`, error)
-          failedFiles.push(file.name)
-          completedFiles++
-          setProgress(Math.round((completedFiles / totalFiles) * 100))
-        }
-      }
-      
-      // All done
-      setUploading(false)
-      fetchDocuments(currentKbId)
-      
-      if (failedFiles.length === 0) {
-        toast.success(`全部 ${totalFiles} 个文件上传处理完成！`)
-      } else {
-        toast.warning(`${totalFiles - failedFiles.length} 个成功，${failedFiles.length} 个失败`)
-      }
+      uploadFiles(selectedFiles, currentKbId)
     }
     input.click()
   }
@@ -437,6 +371,15 @@ export default function KnowledgeBase() {
                 批量下载 ({selectedFiles.length})
               </Button>
             )}
+                        <Button 
+                    variant="default" 
+                    className="h-10 px-6 bg-slate-900 text-white hover:bg-slate-800 transition-all shadow-md group border-none"
+                    onClick={handleUploadClick}
+                    disabled={activeCount > 0} 
+                >
+                    {activeCount > 0 ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <FileUp className="mr-2 h-4 w-4 group-hover:scale-110 transition-transform" />}
+                    {activeCount > 0 ? "正在后台处理..." : "上传文件"}
+                </Button>
             <div className="relative">
               <Button 
                 variant="outline" 
@@ -460,23 +403,8 @@ export default function KnowledgeBase() {
                 </div>
               )}
             </div>
-            <Button className="bg-slate-900 hover:bg-slate-800 gap-2" onClick={handleUploadClick} disabled={uploading}>
-              <FileUp className="h-4 w-4" /> 上传文件
-            </Button>
           </div>
         </div>
-
-        {uploading && (
-          <Card className="border-cyan-200 bg-cyan-50/50">
-            <CardContent className="p-4 flex flex-col gap-2">
-              <div className="flex justify-between items-center text-sm font-medium text-cyan-900">
-                <span>正在上传并索引资源...</span>
-                <span>{progress}%</span>
-              </div>
-              <Progress value={progress} className="h-2 bg-cyan-100" />
-            </CardContent>
-          </Card>
-        )}
 
         {/* Stats Cards */}
         {isLoading ? (
