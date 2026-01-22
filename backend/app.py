@@ -1,4 +1,6 @@
-from flask import Flask, request, jsonify, send_from_directory, Response, stream_with_context
+from flask import Flask, request, jsonify, send_from_directory, Response, stream_with_context, send_file
+import zipfile
+import io
 import json
 import time
 import glob
@@ -578,6 +580,58 @@ def delete_files_batch():
         "deleted_count": deleted_count,
         "errors": errors
     })
+
+@app.route('/api/files/batch-download', methods=['POST'])
+@require_auth
+def download_files_batch():
+    data = request.json
+    filenames = data.get('filenames', [])
+    kb_id = data.get('kb_id', 'default')
+    
+    if not filenames:
+        return jsonify({"error": "No filenames provided"}), 400
+        
+    # Determine base directory for searching files
+    base_dir = os.path.join(Config.UPLOAD_FOLDER, kb_id)
+    if kb_id == 'default' and not os.path.exists(base_dir):
+        # Fallback for legacy default files not in a 'default' folder
+        base_dir = Config.UPLOAD_FOLDER
+        
+    memory_file = io.BytesIO()
+    with zipfile.ZipFile(memory_file, 'w', zipfile.ZIP_DEFLATED) as zf:
+        added_count = 0
+        for filename in filenames:
+            file_path = os.path.join(base_dir, filename)
+            
+            # If not in KB dir, search recursively in UPLOAD_FOLDER as fallback
+            if not os.path.exists(file_path):
+                found = False
+                for root, _, files in os.walk(Config.UPLOAD_FOLDER):
+                    if filename in files:
+                        file_path = os.path.join(root, filename)
+                        found = True
+                        break
+                if not found:
+                    continue
+            
+            if os.path.isfile(file_path):
+                zf.write(file_path, filename)
+                added_count += 1
+                
+        if added_count == 0:
+            return jsonify({"error": "No files found to download"}), 404
+            
+    memory_file.seek(0)
+    
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    zip_filename = f"batch_download_{timestamp}.zip"
+    
+    return send_file(
+        memory_file,
+        mimetype='application/zip',
+        as_attachment=True,
+        download_name=zip_filename
+    )
 
 @app.route('/api/files/<path:filename>', methods=['DELETE'])
 @require_auth

@@ -18,6 +18,10 @@ class ImageProcessor:
         }]
 
     def describe_image(self, image_path):
+        import warnings
+        # Suppress the unclosed file ResourceWarning from dashscope's internal OSS upload
+        warnings.filterwarnings("ignore", category=ResourceWarning, message="unclosed file")
+        
         content = [
             {'image': f'file://{os.path.abspath(image_path)}'},
             {'text': '请详细描述这张图片的内容、风格和可能的用途。如果是图表，请提取其中的关键文字和数据。'}

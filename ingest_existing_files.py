@@ -8,6 +8,13 @@ sys.path.append(os.path.join(os.getcwd(), 'backend'))
 os.environ.setdefault('WEAVIATE_HOST', 'localhost')
 os.environ.setdefault('WEAVIATE_PORT', '8081')
 
+# Load environment variables from backend/.env explicitly
+from dotenv import load_dotenv
+env_path = os.path.join(os.getcwd(), 'backend', '.env')
+if os.path.exists(env_path):
+    load_dotenv(env_path)
+    print(f"Loaded environment from {env_path}")
+
 from config import Config
 from services.vector_db import VectorDB
 from services.llm_service import LLMService
@@ -64,7 +71,9 @@ def batch_reindex():
                 result = ingestion_service.process_file(file_path)
                 status = result.get('status')
                 if status == 'success':
-                    print(f"    [OK] Processed {result.get('chunks_processed')} chunks.")
+                    # Fix: ingestion_service returns 'total_chunks', not 'chunks_processed'
+                    chunks = result.get('total_chunks', 0)
+                    print(f"    [OK] Extracted and stored {chunks} chunks (Parent + Children).")
                     success_count += 1
                 elif status == 'skipped':
                      print(f"    [SKIP] {result.get('message')}")

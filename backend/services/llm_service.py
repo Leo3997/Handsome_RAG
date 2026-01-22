@@ -135,27 +135,42 @@ class LLMService:
         try:
             from dashscope import TextEmbedding
             model_name = TextEmbedding.Models.text_embedding_v2
-            print(f"DEBUG: Generating embedding using model: {model_name}")
-            resp = TextEmbedding.call(
-                model=model_name,
-                input=text_or_list,
-                api_key=api_key
-            )
-            if resp.status_code == HTTPStatus.OK:
-                # If single string, return the vector. If list, return list of vectors.
-                # But to stay consistent, let's always return a list of vectors if input was a list.
-                # If input was string, wrap it.
-                if isinstance(text_or_list, str):
+            
+            # If single string, handle directly
+            if isinstance(text_or_list, str):
+                print(f"DEBUG: Generating embedding using model: {model_name}")
+                resp = TextEmbedding.call(model=model_name, input=text_or_list, api_key=api_key)
+                if resp.status_code == HTTPStatus.OK:
                     return resp.output['embeddings'][0]['embedding']
                 else:
-                    # Return list in original order
-                    embeddings = [None] * len(text_or_list)
-                    for item in resp.output['embeddings']:
-                        embeddings[item['text_index']] = item['embedding']
-                    return embeddings
+                    print(f"Embedding Error: {resp.code} - {resp.message}")
+                    return None
+            
+            # If list, implement batching (DashScope limit is 25)
             else:
-                print(f"Embedding Error: {resp.code} - {resp.message}")
-                return None
+                batch_size = 25
+                all_embeddings = [None] * len(text_or_list)
+                
+                for i in range(0, len(text_or_list), batch_size):
+                    batch = text_or_list[i : i + batch_size]
+                    print(f"DEBUG: Generating embedding for batch {i//batch_size + 1} (size {len(batch)}) using model: {model_name}")
+                    
+                    resp = TextEmbedding.call(
+                        model=model_name,
+                        input=batch,
+                        api_key=api_key
+                    )
+                    
+                    if resp.status_code == HTTPStatus.OK:
+                        # Map back using original indices within this batch
+                        for item in resp.output['embeddings']:
+                            original_index = i + item['text_index']
+                            all_embeddings[original_index] = item['embedding']
+                    else:
+                        print(f"Embedding Error in batch {i//batch_size + 1}: {resp.code} - {resp.message}")
+                        return None # Fail fast on batch error
+                
+                return all_embeddings
         except Exception as e:
             print(f"Embedding Exception: {str(e)}")
             return None

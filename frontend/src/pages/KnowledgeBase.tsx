@@ -20,7 +20,9 @@ import {
   Loader2,
   Database,
   Pencil,
-  MoreVertical
+  MoreVertical,
+  Download,
+  FileArchive
 } from "lucide-react"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
@@ -54,6 +56,7 @@ export default function KnowledgeBase() {
   const [previewFile, setPreviewFile] = useState<any>(null)
   const [isPreviewOpen, setIsPreviewOpen] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
+  const [isDownloading, setIsDownloading] = useState(false)
 
   // Filter State
   const [filterType, setFilterType] = useState<string>("all")
@@ -227,6 +230,35 @@ export default function KnowledgeBase() {
     }
   }
 
+  const handleBatchDownload = async () => {
+    if (selectedFiles.length === 0) return
+    
+    setIsDownloading(true)
+    try {
+      toast.info(`正在准备下载 ${selectedFiles.length} 个文件...`)
+      const blob = await api.downloadFilesBatch(selectedFiles, currentKbId)
+      
+      const url = window.URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+      link.setAttribute('download', `knowledge_base_batch_${timestamp}.zip`)
+      
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.URL.revokeObjectURL(url)
+      
+      toast.success("批量打包下载成功")
+    } catch (error) {
+      console.error("Batch download error:", error)
+      toast.error("批量下载失败")
+    } finally {
+      setIsDownloading(false)
+    }
+  }
+
   const handlePreview = (file: any) => {
     setPreviewFile(file)
     setIsPreviewOpen(true)
@@ -393,6 +425,17 @@ export default function KnowledgeBase() {
               >
                 {isDeleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
                 批量删除 ({selectedFiles.length})
+              </Button>
+            )}
+            {selectedFiles.length > 0 && (
+              <Button 
+                variant="outline" 
+                className="gap-2 border-cyan-200 text-cyan-700 hover:bg-cyan-50 hover:text-cyan-800" 
+                onClick={handleBatchDownload}
+                disabled={isDownloading}
+              >
+                {isDownloading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                批量下载 ({selectedFiles.length})
               </Button>
             )}
             <div className="relative">
