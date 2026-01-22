@@ -19,12 +19,23 @@ class PDFProcessor:
                         text_content = ""
 
                     image_name = f"{base_filename}_page_{page_number}.jpg"
-                    image_path = os.path.join(self.config.PROCESSED_FOLDER, image_name)
+                    image_path = os.path.join(self.config.SLIDES_FOLDER, image_name)
+                    image_url = f"/api/slides/{image_name}"
+                    
+                    # Optional: Try to render page to image
+                    try:
+                        # Only try if we have the folder (which we should)
+                        img = page.to_image(resolution=72)
+                        img.save(image_path, format="JPEG")
+                    except Exception as e:
+                        # Gracefully fail if rendering is not supported on the system
+                        # print(f"  Note: PDF page rendering skipped: {e}")
+                        image_url = None
                     
                     results.append({
                         "page_number": page_number,
                         "text_content": text_content,
-                        "image_path": image_path,
+                        "image_url": image_url,
                         "slide_layout": "standard_page"
                     })
         except Exception as e:

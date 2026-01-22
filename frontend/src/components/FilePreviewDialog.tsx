@@ -1,10 +1,15 @@
 import { useState, useEffect } from "react"
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog"
-import { Loader2, ChevronLeft, ChevronRight } from "lucide-react"
+import { Loader2, ChevronLeft, ChevronRight, Presentation } from "lucide-react"
 import { api } from "@/lib/api"
 
 interface FilePreviewDialogProps {
-    file: { name: string; type?: string } | null
+    file: { 
+        name: string; 
+        type?: string;
+        page?: number;
+        highlightContent?: string;
+    } | null
     isOpen: boolean
     onClose: () => void
 }
@@ -19,6 +24,9 @@ export function FilePreviewDialog({ file, isOpen, onClose }: FilePreviewDialogPr
     useEffect(() => {
         if (isOpen && file) {
             loadPreview(file)
+            if (file.page) {
+                setCurrentSlideIndex(file.page - 1)
+            }
         } else {
             // Reset state on close
             setPptSlides([])
@@ -48,8 +56,6 @@ export function FilePreviewDialog({ file, isOpen, onClose }: FilePreviewDialogPr
             // Fetch text content
             try {
                 const res = await api.getFileContent(f.name)
-                // If it's HTML or huge text, might need handling. For now assume raw string.
-                // The API returns { content: "..." }
                 setTextContent(res.content || "无法预览此文件内容")
             } catch (e) {
                 setTextContent("读取文件失败")
@@ -65,6 +71,17 @@ export function FilePreviewDialog({ file, isOpen, onClose }: FilePreviewDialogPr
         if (currentSlideIndex > 0) setCurrentSlideIndex(p => p - 1)
     }
 
+    const renderHighlightedText = (text: string, highlight?: string) => {
+        if (!highlight || !text.includes(highlight)) return text;
+        const parts = text.split(highlight);
+        return parts.map((part, i) => (
+            <span key={i}>
+                {part}
+                {i < parts.length - 1 && <mark className="bg-yellow-200 text-slate-900 rounded px-1 font-bold animate-pulse">{highlight}</mark>}
+            </span>
+        ));
+    }
+
     if (!file) return null
 
     return (
@@ -77,7 +94,10 @@ export function FilePreviewDialog({ file, isOpen, onClose }: FilePreviewDialogPr
 
                 {/* Header */}
                 <div className="flex items-center justify-between px-4 py-3 bg-slate-950 border-b border-slate-800 text-white shrink-0">
-                    <span className="font-medium truncate">{file.name}</span>
+                    <div className="flex items-center gap-3 truncate">
+                        <span className="font-medium truncate">{file.name}</span>
+                        {file.page && <span className="text-[10px] bg-cyan-600 px-1.5 py-0.5 rounded text-white uppercase font-bold tracking-wider">自动定位: P{file.page}</span>}
+                    </div>
                     <button onClick={onClose} className="text-slate-400 hover:text-white">✕</button>
                 </div>
 
@@ -94,18 +114,18 @@ export function FilePreviewDialog({ file, isOpen, onClose }: FilePreviewDialogPr
                                 <div className="relative w-full h-full flex items-center justify-center">
                                     <img 
                                         src={`/api/slides/${pptSlides[currentSlideIndex].split('/').pop()}`}
-                                        className="max-w-full max-h-full object-contain"
+                                        className="max-w-full max-h-full object-contain shadow-2xl"
                                     />
                                     {/* Controls */}
                                     <button onClick={prevSlide} disabled={currentSlideIndex===0} 
-                                        className="absolute left-4 p-2 bg-black/50 text-white rounded-full hover:bg-black/70 disabled:opacity-30">
+                                        className="absolute left-4 p-2 bg-black/50 text-white rounded-full hover:bg-black/70 disabled:opacity-30 transition-all">
                                         <ChevronLeft />
                                     </button>
                                     <button onClick={nextSlide} disabled={currentSlideIndex===pptSlides.length-1}
-                                        className="absolute right-4 p-2 bg-black/50 text-white rounded-full hover:bg-black/70 disabled:opacity-30">
+                                        className="absolute right-4 p-2 bg-black/50 text-white rounded-full hover:bg-black/70 disabled:opacity-30 transition-all">
                                         <ChevronRight />
                                     </button>
-                                    <div className="absolute bottom-4 bg-black/50 px-3 py-1 rounded text-white text-sm">
+                                    <div className="absolute bottom-4 bg-black/50 px-3 py-1 rounded text-white text-sm font-mono">
                                         {currentSlideIndex + 1} / {pptSlides.length}
                                     </div>
                                 </div>
@@ -120,19 +140,22 @@ export function FilePreviewDialog({ file, isOpen, onClose }: FilePreviewDialogPr
 
                             {previewType === 'pdf' && (
                                 <iframe 
-                                    src={`/api/files/${encodeURIComponent(file.name)}`}
+                                    src={`/api/files/${encodeURIComponent(file.name)}#page=${file.page || 1}`}
                                     className="w-full h-full border-none bg-white"
                                 />
                             )}
 
                             {previewType === 'text' && (
-                                <div className="w-full h-full bg-white text-slate-900 p-8 overflow-auto font-mono text-sm whitespace-pre-wrap">
-                                    {textContent}
+                                <div className="w-full h-full bg-white text-slate-900 p-8 overflow-auto font-mono text-sm whitespace-pre-wrap leading-relaxed">
+                                    {renderHighlightedText(textContent, file.highlightContent)}
                                 </div>
                             )}
                             
                             {previewType === 'ppt' && pptSlides.length === 0 && (
-                                <div className="text-slate-400">No slides found or processing failed.</div>
+                                <div className="text-slate-400 flex flex-col items-center gap-2">
+                                    <Presentation className="h-10 w-10 opacity-20" />
+                                    <span>No slides found or processing failed.</span>
+                                </div>
                             )}
                         </>
                     )}

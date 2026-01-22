@@ -22,6 +22,12 @@ services:
       ENABLE_MODULES: ''
       CLUSTER_HOSTNAME: 'node1'
 
+  redis:
+    image: redis:7.0-alpine
+    ports:
+      - "6379:6379"
+    restart: always
+
   backend:
     build:
       context: ./backend

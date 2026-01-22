@@ -24,6 +24,12 @@ class Config:
     WEAVIATE_PORT = int(os.getenv("WEAVIATE_PORT", 8080))
     WEAVIATE_GRPC_PORT = int(os.getenv("WEAVIATE_GRPC_PORT", 50051))
     
+    # Redis & Celery
+    REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+    REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+    CELERY_BROKER_URL = f"redis://{REDIS_HOST}:{REDIS_PORT}/0"
+    CELERY_RESULT_BACKEND = f"redis://{REDIS_HOST}:{REDIS_PORT}/0"
+    
     # Models
     TEXT_EMBEDDING_MODEL = "m3e-base"  # Local or API-based
     QWEN_LLM_MODEL = "qwen-plus"

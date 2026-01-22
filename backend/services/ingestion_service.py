@@ -116,6 +116,7 @@ class IngestionService:
                         "is_parent": False,
                         "parent_id": parent_id
                     }
+                    if 'image_url' in item: child_meta['image_url'] = item['image_url']
                     metadatas.append(child_meta)
                     ids.append(str(uuid.uuid4()))
             

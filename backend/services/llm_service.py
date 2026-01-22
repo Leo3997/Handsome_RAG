@@ -20,13 +20,16 @@ class LLMService:
             history_text = "\n".join([f"{'用户' if m['role']=='user' else '助手'}: {m['content']}" for m in history[-5:]])
             history_text = f"### 最近对话历史：\n{history_text}\n\n"
 
-        prompt = f"""你是一个专业的企业智能助手。北京时间现在是{os.getenv("CURRENT_TIME", "2024年")}。
-{history_text}请基于以下提供的【参考资料】回答用户最新的问题。
+        prompt = f"""你是一个专业、博学且严谨的企业知识库助手。北京时间现在是{os.getenv("CURRENT_TIME", "2024年")}。
+{history_text}请基于以下提供的【参考资料】回答用户最新的问题。如果资料内容丰富，请务必提供详尽、深入且结构化的回答。
 
-### 要求：
-1. **精准推荐**：如果用户要求推荐PPT或资料，请根据资料内容识别出最相关的文件名，并说明推荐理由。
-2. **行内引用**：在回答中使用 [1]、[2] 等数字标记引用对应的资料片段，例如"根据相关数据[1]显示..."。
-3. **诚实原则**：如果资料中完全没有相关信息，请直接告知，不要编造。
+### 回答要求：
+1. **内容详实**：不要只给出简短的结论。如果资料涉及技术流程、核心原理、具体步骤或背景数据，请尽可能完整地还原并展开说明。
+2. **结构化输出**：善用标题、列表（有序或无序）和粗体来组织内容，使回答清晰易读，逻辑性强。
+3. **精准推荐与引用**：
+   - 识别出最相关的文件名，并说明该文件为何值得参考。
+   - 在回答中强制使用 [1]、[2] 等数字标记引用对应的资料片段，例如"该系统的核心算法采用了...[1]"。
+4. **诚实与逻辑**：如果资料内容有限，请在回答完已知信息后再说明缺失的部分。严禁凭空捏造。
 
 ### 参考资料：
 {context_text}
@@ -34,7 +37,7 @@ class LLMService:
 ### 用户当前问题：
 {query}
 
-### 建议回答："""
+### 建议回答（请展开论述）："""
 
         messages = [
             {'role': 'system', 'content': '你是一个善于分析资料并给出精准建议的AI助手。'},
@@ -218,10 +221,22 @@ class LLMService:
             
         history_text = "\n".join([f"{'User' if m['role']=='user' else 'Assistant'}: {m['content']}" for m in history[-5:]])
         
-        prompt = f"""Given the conversation history and a new user query, rewrite the query to be a standalone search query that can be used for RAG retrieval.
-If the query is already independent, return it exactly as is.
-No preamble, just the output.
+        prompt = f"""You are a keyword extractor. Given the conversation history and a new user message, extract ONLY the core search entities and intent. 
+Strictly NO conversational filler, NO reasoning about why the user is asking, and NO assumptions about failure. 
+Keep the language of keywords the same as the user message (usually Chinese).
 
+# Examples:
+History: 
+User: "Help me find documents about RAG"
+Assistant: "Found 2 files."
+New user query: "Tell me more about the first one"
+Standalone query: "RAG document content"
+
+History: 
+New user query: "你能看到这个吗能耗优化代码解析.docx"
+Standalone query: "能耗优化代码解析.docx"
+
+# Actual Task:
 History:
 {history_text}
 
@@ -270,6 +285,49 @@ Standalone query:"""
             
         return query
 
+    def detect_intent(self, query):
+        """
+        Detects user intent: FILE_QUERY, SUMMARY, or FACTOID.
+        """
+        prompt = f"""Analyze the user's RAG query and classify it into one of these categories:
+- FILE_QUERY: User is looking for a specific file, asking what files exist, or wants to see a document list.
+- SUMMARY: User wants a broad summary, comparison, or high-level analysis of documents.
+- FACTOID: User is asking a specific question, looking for a detail, or needs an explanation of a concept.
+
+Return ONLY the category name.
+
+Query: "{query}"
+Category:"""
+        
+        messages = [
+            {'role': 'system', 'content': 'You are a query intent classifier.'},
+            {'role': 'user', 'content': prompt}
+        ]
+        
+        try:
+            provider = self.config.SETTINGS.get("llm_provider", "dashscope")
+            api_key = self.config.SETTINGS.get("api_key")
+            model = self.config.SETTINGS.get("model_name")
+            
+            if provider == "dashscope":
+                dashscope.api_key = api_key
+                response = dashscope.Generation.call(model=model, messages=messages, result_format='message', temperature=0.1)
+                if response.status_code == HTTPStatus.OK:
+                    return response.output.choices[0].message.content.strip().upper()
+            elif provider in ["deepseek", "openai"]:
+                import requests
+                base_url = self.config.SETTINGS.get("base_url", "")
+                endpoint = f"{base_url.rstrip('/')}/chat/completions"
+                headers = {"Authorization": f"Bearer {api_key}"}
+                payload = {"model": model, "messages": messages, "temperature": 0.1}
+                resp = requests.post(endpoint, json=payload, headers=headers, timeout=10)
+                if resp.status_code == 200:
+                    return resp.json()['choices'][0]['message']['content'].strip().upper()
+        except Exception as e:
+            print(f"Intent detection failed: {e}")
+            
+        return "FACTOID"
+
     def generate_stream(self, query, context_docs, history=None):
         """
         Yields chunks of content (strings).
@@ -282,13 +340,16 @@ Standalone query:"""
             history_text = "\n".join([f"{'用户' if m['role']=='user' else '助手'}: {m['content']}" for m in history[-5:]])
             history_text = f"### 最近对话历史：\n{history_text}\n\n"
 
-        prompt = f"""你是一个专业的企业智能助手。
-{history_text}请基于以下提供的【参考资料】回答用户当前的提问。
+        prompt = f"""你是一个专业、博学且严谨的企业知识库助手。
+{history_text}请基于以下提供的【参考资料】回答用户当前的提问。如果资料充足，请务必提供详尽、深入且具有洞察力的回答。
 
-### 要求：
-1. **精准推荐**：如果用户要求推荐PPT或资料，请根据资料内容识别出最相关的文件名，并说明推荐理由。
-2. **行内引用**：在回答中使用 [1]、[2] 等数字标记引用对应的资料片段，例如"根据相关数据[1]显示..."。
-3. **诚实原则：如果资料中完全没有相关信息，请直接告知，不要编造。
+### 回答要求：
+1. **内容详实**：请展开详述资料中的知识点，包括但不限于概念解说、操作流程、关键指标或对比分析。鼓励输出长篇幅、高质量的内容。
+2. **结构化输出**：使用清晰的段落、标题和列表来组织您的回复，增强可读性。
+3. **精准推荐与引用**：
+   - 识别出最相关的文件名，并说明推荐理由。
+   - 在回答中强制使用 [1]、[2] 等数字标记引用对应的资料片段。
+4. **诚实原则**：如果资料中完全没有相关信息，请直接告知，不要编造。
 
 ### 参考资料：
 {context_text}
@@ -296,7 +357,7 @@ Standalone query:"""
 ### 用户当前问题：
 {query}
 
-### 建议回答："""
+### 建议回答（请尽可能详细）："""
 
         messages = [
             {'role': 'system', 'content': '你是一个善于分析资料并给出精准建议的AI助手。'},

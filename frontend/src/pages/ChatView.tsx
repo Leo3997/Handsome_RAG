@@ -12,7 +12,8 @@ import {
   ChevronRight,
   Loader2,
   Database,
-  ChevronDown
+  ChevronDown,
+  Globe
 } from "lucide-react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Dialog, DialogContent } from "@/components/ui/dialog"
@@ -60,6 +61,7 @@ export default function ChatView() {
   const [knowledgeBases, setKnowledgeBases] = useState<any[]>([])
   const [selectedKbId, setSelectedKbId] = useState("default")
   const [showKbMenu, setShowKbMenu] = useState(false)
+  const [isGlobalSearch, setIsGlobalSearch] = useState(false)
 
   // Prompt Templates State
   const [showTemplates, setShowTemplates] = useState(false)
@@ -130,7 +132,8 @@ export default function ChatView() {
             },
             selectedKbId,
             // Prepare history: take last 10 messages, keep only role and content
-            messages.slice(-10).map(m => ({ role: m.role, content: m.content }))
+            messages.slice(-10).map(m => ({ role: m.role, content: m.content })),
+            isGlobalSearch
         );
     } catch (error) {
         console.error("Chat Error:", error)
@@ -154,7 +157,7 @@ export default function ChatView() {
                     name: source.name,
                     slides: res.slides
                 })
-                setCurrentSlideIndex(0)
+                setCurrentSlideIndex(source.page ? source.page - 1 : 0)
             }
         } catch (e) {
             console.error("Failed to load slides", e)
@@ -165,7 +168,9 @@ export default function ChatView() {
         // Handle generic preview (PDF, Word, etc. as text)
         setSelectedPreviewFile({
             filename: source.name,
-            type: source.type
+            type: source.type,
+            page: source.page,
+            highlightContent: source.content
         })
         setIsPreviewOpen(true)
     }
@@ -224,23 +229,28 @@ export default function ChatView() {
                             <div className="flex flex-wrap gap-2">
                                 {(expandedMessageId === msg.id ? msg.sources : msg.sources.slice(0, 4)).map((s, idx) => {
                                     const isPPT = s.type === 'pptx' || s.type === 'ppt'
+                                    const hasImage = !!s.image_url
                                     return (
                                         <div 
                                             key={idx} 
                                             onClick={() => handleSourceClick(s)}
-                                            className="flex items-center gap-2 bg-slate-50 border px-3 py-1.5 rounded-lg transition-all cursor-pointer hover:border-cyan-200 hover:bg-cyan-50/30 active:scale-95 border-slate-100"
+                                            className="group flex items-center gap-2 bg-white border border-slate-100 p-1 pr-3 rounded-lg transition-all cursor-pointer hover:border-cyan-200 hover:bg-cyan-50/10 active:scale-95 shadow-sm"
                                         >
-                                            {isPPT && isLoadingSlides ? (
-                                                <Loader2 className="h-3.5 w-3.5 text-orange-500 animate-spin" />
-                                            ) : isPPT ? (
-                                                <PptIcon className="h-3.5 w-3.5 text-orange-500" />
-                                            ) : (
-                                                <Paperclip className="h-3.5 w-3.5 text-slate-400" />
-                                            )}
-                                            
-                                            <span className="text-xs font-medium text-slate-600">
-                                                {s.name} (P{s.page})
-                                            </span>
+                                            <div className="h-8 w-8 rounded bg-slate-100 overflow-hidden flex items-center justify-center shrink-0 border border-slate-50">
+                                                {hasImage ? (
+                                                    <img src={s.image_url} alt="" className="h-full w-full object-cover group-hover:scale-110 transition-transform" />
+                                                ) : isPPT ? (
+                                                    isLoadingSlides ? <Loader2 className="h-4 w-4 text-orange-400 animate-spin" /> : <PptIcon className="h-4 w-4 text-orange-500" />
+                                                ) : (
+                                                    <Paperclip className="h-3.5 w-3.5 text-slate-400 font-bold" />
+                                                )}
+                                            </div>
+                                            <div className="flex flex-col min-w-0">
+                                                <span className="text-[10px] font-bold text-slate-800 truncate max-w-[120px]">
+                                                    {s.name}
+                                                </span>
+                                                <span className="text-[9px] text-cyan-600 font-mono font-bold uppercase tracking-tight">定位: P{s.page}</span>
+                                            </div>
                                         </div>
                                     )
                                 })}
@@ -286,15 +296,19 @@ export default function ChatView() {
                         <ChevronDown className={`h-3 w-3 transition-transform ${showKbMenu ? 'rotate-180' : ''}`} />
                     </button>
                     
-                    {/* Prompt Templates Trigger */}
                     <button 
-                        onClick={() => setShowTemplates(!showTemplates)}
-                        className="ml-2 flex items-center gap-2 px-3 py-1.5 rounded-full border border-cyan-100 bg-cyan-50/30 hover:bg-cyan-50 text-cyan-600 text-[11px] font-bold transition-all active:scale-95"
+                        onClick={() => setIsGlobalSearch(!isGlobalSearch)}
+                        className={`ml-2 flex items-center gap-2 px-3 py-1.5 rounded-full border transition-all active:scale-95 text-[11px] font-bold ${
+                            isGlobalSearch 
+                            ? 'border-indigo-200 bg-indigo-50 text-indigo-600' 
+                            : 'border-slate-100 bg-slate-50/50 text-slate-400 hover:text-indigo-400 hover:border-indigo-100'
+                        }`}
+                        title={isGlobalSearch ? "正在检索所有知识库" : "点击开启全库搜索"}
                     >
-                        <Sparkles className="h-3 w-3" />
-                        <span>✨ 提示词模板</span>
+                        <Globe className={`h-3 w-3 ${isGlobalSearch ? 'animate-pulse' : ''}`} />
+                        <span>全库检索: {isGlobalSearch ? '开启' : '关闭'}</span>
                     </button>
-                    
+
                     {showTemplates && (
                         <div className="absolute bottom-full left-0 ml-32 mb-2 z-30 bg-white border border-slate-200 rounded-xl shadow-xl py-1.5 min-w-48 animate-in slide-in-from-bottom-2 duration-200">
                              <div className="px-3 py-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-widest border-bottom border-slate-50">常用模板</div>

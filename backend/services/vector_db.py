@@ -1,5 +1,7 @@
 import time
 import uuid
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 import weaviate
 import weaviate.classes.config as wvc
 from weaviate.classes.query import MetadataQuery
@@ -158,12 +160,22 @@ class VectorDB:
             for fail in self.collection.batch.failed_objects[:2]:
                  print(f"Error: {fail.message}")
 
-    def query(self, query_text, n_results=5, alpha=None):
+    def query(self, query_text, n_results=5, alpha=None, target_collection=None):
         """
         Hybrid search (Vector + BM25).
         alpha: 0 = BM25 only, 1 = Vector only, 0.5 = Equal weight.
         If alpha is None, uses value from Config.SETTINGS.
+        target_collection: If provided, use this collection instead of self.collection (for thread safety).
         """
+        # DEBUG LOG
+        log_path = r"f:\DLS_RAG\backend\query_debug.log"
+        active_kb = self.kb_id
+        current_coll = target_collection or self.collection
+        coll_name = current_coll.name if current_coll else "Unknown"
+        
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.now()}] QUERY | KB: {active_kb} | Collection: {coll_name} | Query: {query_text}\n")
+            
         if alpha is None:
             from config import Config
             alpha = Config.SETTINGS.get("hybrid_alpha", 0.5)
@@ -176,9 +188,14 @@ class VectorDB:
         if alpha > 0 and self.embedding_fn:
             vector = self.embedding_fn(query_text) # Use original text for vectorization
 
-        response = self.collection.query.hybrid(
+        if not current_coll:
+            print(f"ERROR: No collection available for query")
+            return []
+
+        response = current_coll.query.hybrid(
             query=processed_query,
             vector=vector,
+            query_properties=["text", "source_file"],
             limit=n_results,
             alpha=alpha,
             return_metadata=MetadataQuery(score=True, distance=True)
@@ -196,13 +213,30 @@ class VectorDB:
                 if parent_text:
                     text = parent_text
             
+            upload_date_str = obj.properties.get("upload_date", "")
+            
+            # Recency Boost calculation
+            recency_score = 0.0
+            if upload_date_str:
+                try:
+                    upload_dt = datetime.strptime(upload_date_str, '%Y-%m-%d')
+                    days_diff = (datetime.now() - upload_dt).days
+                    # Linear boost for items from the last 30 days
+                    if days_diff <= 30:
+                        recency_score = 0.1 * (1 - days_diff/30.0)
+                except:
+                    pass
+
             results.append({
                 "text": text,
                 "metadata": {
                     "source_file": source_file,
-                    "score": obj.metadata.score,
+                    "score": obj.metadata.score + recency_score,
                     "chunk_id": obj.properties.get("chunk_id", 0),
-                    "parent_id": parent_id
+                    "parent_id": parent_id,
+                    "upload_date": upload_date_str,
+                    "page_number": obj.properties.get("page_number", 1),
+                    "text_snippet": obj.properties.get("text", "")[:200] # First 200 chars for matching
                 }
             })
             
@@ -221,6 +255,79 @@ class VectorDB:
             return dedup_results
             
         return results
+
+    def global_query(self, query_text, n_results=5, alpha=None):
+        """
+        Search across all knowledge base collections in parallel.
+        """
+        log_path = r"f:\DLS_RAG\backend\query_debug.log"
+        try:
+            kb_names = self.list_all_kbs()
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"[{datetime.now()}] PARALLEL GLOBAL QUERY START | query: {query_text}\n")
+                
+            all_results = []
+            
+            def query_kb_task(kb_name):
+                kb_id = kb_name.replace("KB_", "")
+                try:
+                    # Get collection object without changing global state
+                    kb_coll = self.client.collections.get(kb_name)
+                    res = self.query(query_text, n_results=n_results * 2, alpha=alpha, target_collection=kb_coll)
+                    
+                    if not res:
+                        return []
+                        
+                    # 1. Normalize scores (Local Max-Min)
+                    max_kb_score = max(r["metadata"].get("score", 0) for r in res)
+                    min_kb_score = min(r["metadata"].get("score", 0) for r in res)
+                    score_range = max_kb_score - min_kb_score if max_kb_score > min_kb_score else 1.0
+                    
+                    processed_res = []
+                    query_low = query_text.lower()
+                    
+                    for r in res:
+                        r_copy = r.copy()
+                        r_copy["metadata"] = r["metadata"].copy()
+                        r_copy["metadata"]["kb_id"] = kb_id
+                        
+                        raw_score = r_copy["metadata"].get("score", 0)
+                        norm_score = (raw_score - min_kb_score) / score_range if score_range > 0 else 0.5
+                        
+                        # Filename Boost
+                        source_file = r_copy["metadata"].get("source_file", "").lower()
+                        boost = 1.0
+                        if source_file and (source_file in query_low or query_low in source_file):
+                            boost = 3.0
+                            
+                        r_copy["metadata"]["global_score"] = norm_score * boost
+                        processed_res.append(r_copy)
+                    return processed_res
+                except Exception as inner_e:
+                    print(f"Error querying KB {kb_name}: {inner_e}")
+                    return []
+
+            # Execute in parallel
+            with ThreadPoolExecutor(max_workers=min(len(kb_names), 8)) as executor:
+                future_results = executor.map(query_kb_task, kb_names)
+                
+            for res_list in future_results:
+                all_results.extend(res_list)
+            
+            # Sort by global_score descending
+            all_results.sort(key=lambda x: x["metadata"].get("global_score", 0), reverse=True)
+            
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"[{datetime.now()}] PARALLEL GLOBAL QUERY END | Total results: {len(all_results)}\n")
+                if all_results:
+                    top = all_results[0]
+                    f.write(f"  - Top global hit: {top['metadata'].get('source_file')} (Global Score: {top['metadata'].get('global_score', 0):.4f})\n")
+                
+            return all_results[:n_results]
+        except Exception as e:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"[{datetime.now()}] CRITICAL ERROR in parallel global_query: {str(e)}\n")
+            return []
 
     def delete_collection(self):
         """Clear all data in current knowledge base."""

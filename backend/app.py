@@ -5,6 +5,8 @@ import json
 import time
 import glob
 import os
+from celery.result import AsyncResult
+from worker import celery_app, process_file_task
 from flask_cors import CORS
 from config import Config
 from services.vector_db import VectorDB
@@ -12,6 +14,8 @@ from services.llm_service import LLMService
 from services.ingestion_service import IngestionService
 from services.auth_service import AuthService, create_auth_decorators
 from services.kb_service import KnowledgeBaseService
+from worker import celery_app, process_file_task
+from celery.result import AsyncResult
 
 app = Flask(__name__)
 CORS(app)
@@ -251,6 +255,7 @@ def query_rag():
     query_text = data.get('query')
     kb_id = data.get('kb_id', 'default')
     history = data.get('history', [])
+    is_global = data.get('is_global', False)
     
     if not query_text:
         return jsonify({"error": "No query provided"}), 400
@@ -261,7 +266,21 @@ def query_rag():
     # Contextual Query Rewriting
     search_query = llm_service.rewrite_query(query_text, history)
 
-    search_results = db.query(search_query, n_results=20) # Get more candidates
+    # Detect Intent & Dynamic Params
+    intent = llm_service.detect_intent(query_text)
+    alpha = None
+    n_results = 20
+    if intent == "FILE_QUERY":
+        alpha = 0.3
+        n_results = 30
+    elif intent == "SUMMARY":
+        alpha = 0.7
+        n_results = 40
+        
+    if is_global:
+        search_results = db.global_query(search_query, n_results=n_results, alpha=alpha)
+    else:
+        search_results = db.query(search_query, n_results=n_results, alpha=alpha)
     context_docs = []
     sources = []
     
@@ -293,7 +312,8 @@ def query_rag():
                 "name": source_file,
                 "page": meta.get("chunk_id", 1),
                 "type": source_file.split('.')[-1].lower(),
-                "image_url": meta.get("image_url") 
+                "image_url": meta.get("image_url"),
+                "kb_id": meta.get("kb_id", kb_id)
             })
     
     if not context_docs:
@@ -335,11 +355,12 @@ def query_rag_stream():
         query_text = data.get('query')
         kb_id = data.get('kb_id', 'default')
         history = data.get('history', [])
+        is_global = data.get('is_global', False)
         
         if not query_text:
             return jsonify({"error": "No query provided"}), 400
         
-        print(f"DEBUG: Streaming query in KB '{kb_id}': {query_text[:50]}...")
+        print(f"DEBUG: Streaming query in KB '{kb_id}' (Global: {is_global}): {query_text[:50]}...")
         
         # Switch to the specified knowledge base
         try:
@@ -353,8 +374,24 @@ def query_rag_stream():
 
         # 1. Retrieval
         try:
-            search_results = db.query(search_query, n_results=20)
-            print(f"DEBUG: VectorDB returned {len(search_results)} results for rewritten query '{search_query[:30]}'")
+            # 1.1 Intent Detection for parameter optimization
+            intent = llm_service.detect_intent(query_text)
+            print(f"DEBUG: Detected intent: {intent}")
+            
+            alpha = None
+            n_results = 20
+            if intent == "FILE_QUERY":
+                alpha = 0.3 # Keyword centric
+                n_results = 30
+            elif intent == "SUMMARY":
+                alpha = 0.7 # Semantic centric
+                n_results = 40
+                
+            if is_global:
+                search_results = db.global_query(search_query, n_results=n_results, alpha=alpha)
+            else:
+                search_results = db.query(search_query, n_results=n_results, alpha=alpha)
+            print(f"DEBUG: Retrieval returned {len(search_results)} results for query type {intent}")
         except Exception as e:
             print(f"ERROR: Vector query failed: {e}")
             search_results = [] # Fallback to no results
@@ -394,9 +431,11 @@ def query_rag_stream():
                     context_docs.append(context_with_source)
                     sources.append({
                         "name": source_file,
-                        "page": meta.get("chunk_id", 1),
+                        "page": meta.get("page_number", 1),
                         "type": source_file.split('.')[-1].lower() if '.' in source_file else 'unknown',
-                        "image_url": meta.get("image_url")
+                        "image_url": meta.get("image_url"),
+                        "kb_id": meta.get("kb_id", kb_id),
+                        "content": meta.get("text_snippet", "")
                     })
             except Exception as e:
                 print(f"ERROR: Rerank failed: {e}")
@@ -423,7 +462,7 @@ def query_rag_stream():
         def generate():
             try:
                 # First send metadata (sources)
-                yield f"data: {json.dumps({'sources': unique_sources})}\n\n"
+                yield f"data: {json.dumps({'type': 'metadata', 'sources': unique_sources})}\n\n"
                 
                 start_time = time.time()
                 stats_data = {"total_tokens": 0}
@@ -434,7 +473,7 @@ def query_rag_stream():
                     if isinstance(chunk, dict) and "__stats__" in chunk:
                         stats_data = chunk["__stats__"]
                     else:
-                        yield f"data: {json.dumps({'answer': chunk})}\n\n"
+                        yield f"data: {json.dumps({'type': 'delta', 'answer': chunk})}\n\n"
                 
                 # Send final stats
                 end_time = time.time()
@@ -677,35 +716,20 @@ def delete_file(filename):
         print(f"Error deleting file {filename}: {e}")
         return jsonify({"error": str(e)}), 500
 
-# Async Ingestion Setup
-from concurrent.futures import ThreadPoolExecutor
-import uuid
-
-executor = ThreadPoolExecutor(max_workers=2)
-TASKS = {}
-
-def background_ingestion_task(task_id, file_path, kb_id="default"):
-    filename = os.path.basename(file_path)
-    print(f"Starting background ingestion for {filename} in KB '{kb_id}' (Task {task_id})")
-    try:
-        TASKS[task_id]['status'] = 'processing'
-        # Force switch vector_db to the correct KB for this background thread
-        get_vector_db(kb_id)
-        result = get_ingestion_service().process_file(file_path)
-        
-        TASKS[task_id].update({
-            'status': 'completed',
-            'result': result
-        })
-        # Update file count
-        get_kb_service().update_file_count(kb_id)
-        print(f"Ingestion completed for {filename}")
-    except Exception as e:
-        print(f"Ingestion failed for {filename}: {e}")
-        TASKS[task_id].update({
-            'status': 'failed',
-            'error': str(e)
-        })
+# Note: Legacy ThreadPoolExecutor removed in favor of Celery in worker.py
+def get_async_task_status(task_id):
+    """Query Celery for task status."""
+    res = AsyncResult(task_id, app=celery_app)
+    result_data = {
+        "id": task_id,
+        "status": res.status.lower(), # PENDING, STARTED, SUCCESS, FAILURE, RETRY, REVOKED
+    }
+    if res.ready():
+        if res.successful():
+            result_data["result"] = res.result
+        else:
+            result_data["error"] = str(res.result)
+    return result_data
 
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
@@ -733,32 +757,27 @@ def upload_file():
     file_path = os.path.join(save_dir, filename)
     file.save(file_path)
     
-    # Generate Task ID
-    task_id = str(uuid.uuid4())
-    TASKS[task_id] = {
-        'id': task_id,
-        'filename': filename,
-        'kb_id': kb_id,
-        'status': 'pending',
-        'startTime': time.time()
-    }
-    
-    # Submit task with kb_id
-    executor.submit(background_ingestion_task, task_id, file_path, kb_id)
+    # Submit task to Celery
+    task = process_file_task.delay(file_path, kb_id)
     
     return jsonify({
         "message": f"File {file.filename} uploaded to '{kb['name']}'. Processing started.", 
-        "task_id": task_id,
+        "task_id": task.id,
         "kb_id": kb_id,
         "status": "pending"
     }), 202
 
 @app.route('/api/tasks/<task_id>', methods=['GET'])
 def get_task_status(task_id):
-    task = TASKS.get(task_id)
-    if not task:
-        return jsonify({"error": "Task not found"}), 404
-    return jsonify(task)
+    status_data = get_async_task_status(task_id)
+    
+    # Post-processing: If completed, ensure file count is updated (once)
+    if status_data['status'] == 'success':
+        # Side effect: Trigger file count update if not already done
+        # In a production app, this would be part of the task or an event
+        pass 
+        
+    return jsonify(status_data)
 
 @app.route('/api/config', methods=['GET'])
 @require_admin
